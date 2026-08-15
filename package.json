@@ -1,0 +1,27 @@
+{
+  "name": "zotero-pdf-auto-crop",
+  "version": "0.1.0",
+  "description": "Zotero plugin: auto-detect and crop PDF white margins by rewriting page boxes (MediaBox/CropBox). Non-destructive, reversible, no external dependencies.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-xpi.mjs",
+    "watch": "node scripts/build-xpi.mjs --watch",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "gen-fixtures": "node scripts/generate-fixtures.mjs",
+    "prototype": "node scripts/prototype.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.8.69"
+  },
+  "devDependencies": {
+    "@napi-rs/canvas": "^0.1.65",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+prototype-out/
+dist/
+build/
+*.xpi
+*.log
+.DS_Store
