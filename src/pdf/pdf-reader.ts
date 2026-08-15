@@ -39,6 +39,8 @@ export interface PdfOpenOptions {
   /** pdfjs 标准字体数据目录（Node 为文件路径；Zotero 中为 chrome:// 资源 URL） */
   standardFontDataUrl?: string;
   canvasBackend?: CanvasBackend;
+  /** pdf.js 的 ownerDocument（Zotero 中传主窗口 document；缺省自动探测） */
+  ownerDocument?: unknown;
 }
 
 /** 渲染 DPI（≈0.18 mm/px，白边检测精度足够；100–120 均合理，默认 100） */
@@ -60,6 +62,7 @@ export async function openPdfDocument(
   const pdf = await pdfjsLib.getDocument({
     data: new Uint8Array(data),
     standardFontDataUrl: options.standardFontDataUrl,
+    ownerDocument: options.ownerDocument ?? detectOwnerDocument(),
   }).promise;
   const backend = options.canvasBackend ?? createDefaultCanvasBackend();
   return new PdfJsDocument(pdf, backend);
@@ -76,13 +79,44 @@ async function loadPdfJs(): Promise<any> {
   return pdfjsLib;
 }
 
-/** 默认画布后端：环境探测（浏览器 OffscreenCanvas → DOM canvas → Node canvas） */
+/** 探测可用的 document（bootstrap 全局无 document，Zotero 需取主窗口） */
+function detectOwnerDocument(): unknown {
+  const g = globalThis as any;
+  if (g.document) return g.document;
+  try {
+    if (typeof g.Zotero?.getMainWindow === 'function') {
+      return g.Zotero.getMainWindow().document;
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
+/**
+ * 默认画布后端：环境探测。
+ * 1. OffscreenCanvas（Firefox window/worker/部分特权环境）；
+ * 2. Zotero 主窗口 document（bootstrap 全局无 document，但主窗口有）；
+ * 3. 全局 document（浏览器）；
+ * 4. 其他环境抛错（调用方显式传入 canvasBackend，如 Node 测试）。
+ */
 export function createDefaultCanvasBackend(): CanvasBackend {
   const g = globalThis as any;
   if (typeof g.OffscreenCanvas === 'function') {
     return {
       createCanvas(width: number, height: number) {
         return new g.OffscreenCanvas(width, height);
+      },
+    };
+  }
+  if (typeof g.Zotero !== 'undefined' && typeof g.Zotero.getMainWindow === 'function') {
+    return {
+      createCanvas(width: number, height: number) {
+        const doc = g.Zotero.getMainWindow().document;
+        const c = doc.createElement('canvas');
+        c.width = width;
+        c.height = height;
+        return c;
       },
     };
   }
@@ -151,7 +185,12 @@ export class PdfJsDocument implements PdfDocumentHandle {
         scale,
       };
     } finally {
-      page.cleanup();
+      // cleanup 失败（如渲染中断后的状态不一致）不得掩盖原始渲染错误
+      try {
+        page.cleanup();
+      } catch {
+        /* ignore */
+      }
     }
   }
 

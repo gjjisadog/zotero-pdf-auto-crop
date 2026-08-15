@@ -43,7 +43,10 @@ export class CropError extends Error {
   readonly kind: CropErrorKind;
 
   constructor(kind: CropErrorKind, message: string, cause?: unknown) {
-    super(message, cause !== undefined ? { cause } : undefined);
+    super(
+      cause instanceof Error ? `${message} [${cause.message}]` : message,
+      cause !== undefined ? { cause } : undefined
+    );
     this.name = 'CropError';
     this.kind = kind;
   }

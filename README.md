@@ -122,6 +122,24 @@ MIT License（详见 [LICENSE](LICENSE)）。
 （GPL-3.0-or-later）的思想，但本插件为其**独立实现**，未复制其源码，不受 GPL 传染；
 运行时依赖为 MIT 许可的纯 JavaScript 库（pdf-lib、pdf.js）。
 
+## 实机验证（Zotero 9.0.6）
+
+已在 Zotero 9.0.6（macOS）上完成实机验证：
+
+- **安装**：XPI 经 AddonManager 注册成功，bootstrap startup 正常执行；
+- **菜单**：条目右键菜单注册成功（`Zotero.MenuManager`）；
+- **端到端裁剪**：真实进程内完成 渲染（主窗口 canvas + 自带 pdf.js）→
+  像素分析（扫描阴影自动排除）→ 布局/稳定化 → 写 CropBox → 临时文件 +
+  校验 + 原子替换 → 恢复元数据写入（Info 字典），裁剪框与单元测试结果一致；
+- **恢复**：按元数据还原 MediaBox/CropBox，与原始完全一致；
+- 右键菜单的显示逻辑（仅单个 PDF 附件可见）与 Reader 自动刷新、Sync 上传
+  属于 GUI 交互路径，请在真实使用中确认。
+
+> 实机调试中发现并修复的 Zotero 9 环境问题（均已在代码中解决）：
+> bootstrap 全局缺少 `DOMException`/`console`/`ReadableStream` 等 DOM 构造器
+> （启动时从主窗口补齐）、`IOUtils.read` 返回跨 realm 数组（复制到当前
+> realm）、pdf.js 渲染需要 `ownerDocument`（传入主窗口 document）。
+
 ## 开发
 
 ```bash

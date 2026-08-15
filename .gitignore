@@ -5,3 +5,4 @@ build/
 *.xpi
 *.log
 .DS_Store
+.research/

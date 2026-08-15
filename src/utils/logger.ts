@@ -39,11 +39,13 @@ class ZoteroLogger implements Logger {
     Zotero.debug(`Zotero PDF Auto Crop: ${message}`);
   }
   error(message: string, err?: unknown): void {
-    if (err instanceof Error) {
-      Zotero.logError(new Error(`Zotero PDF Auto Crop: ${message}`, { cause: err }));
-    } else {
-      Zotero.logError(new Error(`Zotero PDF Auto Crop: ${message}`));
+    const detail = err instanceof Error ? ` -- ${err.message}` : err ? ` -- ${String(err)}` : '';
+    const wrapped = new Error(`Zotero PDF Auto Crop: ${message}${detail}`);
+    if (err instanceof Error && err.stack) {
+      // 保留原始堆栈以便定位
+      (wrapped as any).cause = err;
     }
+    Zotero.logError(wrapped);
   }
 }
 

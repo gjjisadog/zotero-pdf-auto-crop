@@ -27,7 +27,10 @@ export interface FileSystem {
 /** Zotero 实现（IOUtils） */
 export class ZoteroFileSystem implements FileSystem {
   async readFile(path: string): Promise<Uint8Array> {
-    return IOUtils.read(path);
+    const buf = await IOUtils.read(path);
+    // IOUtils 返回的数组可能来自其他 realm（instanceof 失败会让 pdf-lib 拒绝），
+    // 复制到当前 realm
+    return new Uint8Array(buf);
   }
   async writeFile(path: string, data: Uint8Array): Promise<void> {
     await IOUtils.write(path, data);

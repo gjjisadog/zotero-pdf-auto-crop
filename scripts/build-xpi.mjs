@@ -35,7 +35,7 @@ await build({
   target: 'firefox115',
   outfile: join(SCRIPTS, `${addonRef}.js`),
   sourcemap: false,
-  minify: true,
+  minify: process.env.ZPAC_NO_MINIFY ? false : true,
   define: {
     'process.env.NODE_ENV': '"production"',
   },
