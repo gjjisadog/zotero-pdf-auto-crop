@@ -16,13 +16,15 @@ export interface PageAnalysis {
   rotation: number;
   /** 内容占比过低（空白页） */
   isBlank: boolean;
+  /** 深色背景页（整页图/深色封面）：渲染分析不可靠，不裁剪 */
+  darkBackground: boolean;
   /** 与组内主体页偏差过大（封面/整页图/横向表等） */
   isOutlier: boolean;
   /** 渲染/分析失败（按安全方式处理：不裁剪） */
   analysisFailed: boolean;
 }
 
-export type PageGroupKind = 'normal' | 'odd' | 'even' | 'blank' | 'outlier' | 'failed';
+export type PageGroupKind = 'normal' | 'odd' | 'even' | 'blank' | 'outlier' | 'failed' | 'dark';
 
 export interface PageGroup {
   id: string;
@@ -71,6 +73,8 @@ export interface CropConfig {
    * 不可用时该页标记分析失败（不裁剪，安全优先）。测试环境可关闭。
    */
   requireEmbeddedFonts: boolean;
+  /** 深色背景判定：背景灰度低于该值视为深色页（整页图等），不裁剪 */
+  darkBackgroundGray: number;
 }
 
 export const DEFAULT_CROP_CONFIG: CropConfig = {
@@ -82,4 +86,5 @@ export const DEFAULT_CROP_CONFIG: CropConfig = {
   oddEvenMinPages: 8,
   oddEvenMarginDiffFraction: 0.015,
   requireEmbeddedFonts: true,
+  darkBackgroundGray: 200,
 };

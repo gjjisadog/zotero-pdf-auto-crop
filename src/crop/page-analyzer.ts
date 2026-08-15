@@ -31,6 +31,13 @@ export interface PixelAnalyzeOptions {
   blankFraction?: number;
   /** 背景估计使用的边缘带宽度比例，默认 0.03 */
   edgeBandFraction?: number;
+  /**
+   * 边缘暗带（扫描阴影/黑边）判定：边缘列/行的「内容像素占比」超过该值
+   * 视为暗带（整列都是偏离背景的像素 = 阴影/黑边/渐变伪影），从内容检测中
+   * 排除；默认 0.6。暗带最大宽度默认 5% 页面尺寸。
+   */
+  darkBandRatio?: number;
+  darkBandMaxFraction?: number;
 }
 
 export interface PixelAnalyzeResult {
@@ -48,6 +55,8 @@ const DEFAULT_OPTS: Required<PixelAnalyzeOptions> = {
   minCount: 3,
   blankFraction: 5e-4,
   edgeBandFraction: 0.03,
+  darkBandRatio: 0.6,
+  darkBandMaxFraction: 0.05,
 };
 
 export function analyzePagePixels(page: RenderedPage, options: PixelAnalyzeOptions = {}): PixelAnalyzeResult {
@@ -97,6 +106,45 @@ export function analyzePagePixels(page: RenderedPage, options: PixelAnalyzeOptio
       isContent[i] = 1;
       contentCount++;
     }
+  }
+
+  // 4. 边缘暗带检测（扫描阴影/黑边）：整列/整行内容像素占比极高的边缘连续带
+  //    （渐变阴影、黑边、纸张边缘伪影），从内容检测中排除。
+  const maxBand = Math.max(1, Math.round(w * opts.darkBandMaxFraction));
+  const colRatio = new Float32Array(w);
+  for (let x = 0; x < w; x++) {
+    let cnt = 0;
+    for (let y = 0; y < h; y++) cnt += isContent[y * w + x];
+    colRatio[x] = cnt / h;
+  }
+  const rowRatio = new Float32Array(h);
+  for (let y = 0; y < h; y++) {
+    let cnt = 0;
+    const row = y * w;
+    for (let x = 0; x < w; x++) cnt += isContent[row + x];
+    rowRatio[y] = cnt / w;
+  }
+  const ratio = opts.darkBandRatio;
+  let skipLeft = 0;
+  while (skipLeft < maxBand && colRatio[skipLeft] > ratio) skipLeft++;
+  let skipRight = 0;
+  while (skipRight < maxBand && colRatio[w - 1 - skipRight] > ratio) skipRight++;
+  let skipBottom = 0;
+  while (skipBottom < maxBand && rowRatio[skipBottom] > ratio) skipBottom++;
+  let skipTop = 0;
+  while (skipTop < maxBand && rowRatio[h - 1 - skipTop] > ratio) skipTop++;
+  // 暗带像素清零（水平/垂直 run 过滤自然排除）
+  for (let x = 0; x < skipLeft; x++) {
+    for (let y = 0; y < h; y++) isContent[y * w + x] = 0;
+  }
+  for (let x = w - skipRight; x < w; x++) {
+    for (let y = 0; y < h; y++) isContent[y * w + x] = 0;
+  }
+  for (let y = 0; y < skipBottom; y++) {
+    for (let x = 0; x < w; x++) isContent[y * w + x] = 0;
+  }
+  for (let y = h - skipTop; y < h; y++) {
+    for (let x = 0; x < w; x++) isContent[y * w + x] = 0;
   }
 
   const contentFraction = contentCount / (w * h);

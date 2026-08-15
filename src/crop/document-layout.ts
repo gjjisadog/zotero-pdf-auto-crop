@@ -90,7 +90,7 @@ export function markOutliers(analyses: PageAnalysis[], config: CropConfig): void
   for (const indexes of groups.values()) {
     const withContent = indexes.filter((i) => {
       const a = analyses[i];
-      return a.contentBox && !a.isBlank && !a.analysisFailed;
+      return a.contentBox && !a.isBlank && !a.darkBackground && !a.analysisFailed;
     });
     if (withContent.length === 0) continue;
     const lefts = withContent.map((i) => analyses[i].contentBox!.left);
@@ -128,6 +128,17 @@ export function markOutliers(analyses: PageAnalysis[], config: CropConfig): void
         a.isOutlier = true;
         continue;
       }
+      // 内容占满页面（边缘触及 MediaBox 且面积占比高）→ 整页图/封面
+      const areaRatio = area / (w * h);
+      const touchesEdge =
+        cb.left - a.mediaBox.left < 3 &&
+        cb.bottom - a.mediaBox.bottom < 3 &&
+        a.mediaBox.right - cb.right < 3 &&
+        a.mediaBox.top - cb.top < 3;
+      if (touchesEdge && areaRatio > 0.85) {
+        a.isOutlier = true;
+        continue;
+      }
       // 边缘偏离异常
       if (
         Math.abs(cb.left - mL) > devX ||
@@ -153,6 +164,13 @@ export function analyzeLayout(analyses: PageAnalysis[], config: CropConfig): Doc
       a.isBlank = true;
     }
   }
+  // 深色背景页单独处理（不参与统计、不裁剪）
+  for (const a of analyses) {
+    if (a.darkBackground) {
+      a.isBlank = false;
+      a.isOutlier = true;
+    }
+  }
   markOutliers(analyses, config);
 
   const groups: PageGroup[] = [];
@@ -169,7 +187,7 @@ export function analyzeLayout(analyses: PageAnalysis[], config: CropConfig): Doc
     const rotation = normalizeRotation(representative.rotation);
     const display = displaySize({ width, height }, rotation);
 
-    // 空白页组
+    // 空白页组 / 深色背景页组（均不裁剪）
     const blanks = indexes.filter((i) => analyses[i].isBlank || analyses[i].analysisFailed);
     if (blanks.length > 0) {
       groups.push({
@@ -182,9 +200,21 @@ export function analyzeLayout(analyses: PageAnalysis[], config: CropConfig): Doc
       });
       for (const i of blanks) groupOf.set(i, groups[groups.length - 1].id);
     }
+    const darkPages = indexes.filter((i) => analyses[i].darkBackground && !analyses[i].isBlank && !analyses[i].analysisFailed);
+    if (darkPages.length > 0) {
+      groups.push({
+        id: nextId(),
+        kind: 'dark',
+        pageIndexes: darkPages,
+        width: display.width,
+        height: display.height,
+        rotation,
+      });
+      for (const i of darkPages) groupOf.set(i, groups[groups.length - 1].id);
+    }
 
     // 主体页：尝试奇偶拆分
-    const main = indexes.filter((i) => !analyses[i].isBlank && !analyses[i].analysisFailed);
+    const main = indexes.filter((i) => !analyses[i].isBlank && !analyses[i].analysisFailed && !analyses[i].darkBackground);
     if (main.length === 0) continue;
     const split = splitOddEvenIfMirrored(analyses, main, config);
     const buckets: { kind: 'normal' | 'odd' | 'even'; indexes: number[] }[] = split

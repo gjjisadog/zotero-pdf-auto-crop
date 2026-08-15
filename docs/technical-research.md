@@ -1,10 +1,11 @@
 # Zotero PDF Auto Crop — 技术调查报告（Phase 1）
 
 > 调查时间：2026-08-15
-> 调查对象：Zotero 当前稳定版（Zotero 7.x）、Zotero 7 插件 API、PDF Reader 架构、
-> 附件文件更新/同步机制、`abarker/pdfCropMargins`（算法参考，GPL-3.0）、`pdf-lib`（PDF 写入引擎候选）。
-> 本报告中的 API 事实均来自 Zotero 官方源码（`zotero/zotero` master 分支、
-> `zotero/reader`、`zotero/document-worker` 子模块）原文引证，不是凭经验猜测。
+> 调查对象：Zotero 当前稳定版（**Zotero 9.0.6**，2026-07-07 发布；9.0 于 2026-04 发布）、
+> Zotero 9 插件 API、PDF Reader 架构、附件文件更新/同步机制、`abarker/pdfCropMargins`
+> （算法参考，GPL-3.0）、`pdf-lib`（PDF 写入引擎候选）。
+> 本报告中的 API 事实均来自 Zotero 官方源码（`zotero/zotero` master 分支，即 9.x 当前
+> 开发版；`zotero/reader`、`zotero/document-worker` 子模块）原文引证，不是凭经验猜测。
 
 ---
 
@@ -38,10 +39,12 @@
 
 ### 1.1 版本
 
-Zotero 7.x 为当前稳定版（Zotero 7 于 2024 年 8 月发布，取代 Zotero 6；6 已停止维护）。
-插件 manifest 中声明 `"strict_min_version": "7.0"` 即可锁定 Zotero 7+。
+**Zotero 9.0.6 为当前稳定版**（2026-07-07；9.0 于 2026-04-10 发布；7/8 系列已停止维护）。
+本文所有源码引证均来自 `zotero/zotero` master 分支（即 9.x 当前开发版），因此 API 事实
+对 9.x 有效；本插件 manifest 声明 `"strict_min_version": "7.0"`、`"strict_max_version": "9.*"`，
+兼容 7/8/9 三个系列（9 未移除 7 的插件 API）。
 
-### 1.2 插件包结构（Zotero 7）
+### 1.2 插件包结构（Zotero 7/8/9）
 
 XPI 本质是一个 zip，包含：
 
@@ -93,6 +96,10 @@ async function shutdown({...}, reason) { /* reason === APP_SHUTDOWN 时跳过 */
 
 要点：
 - `rootURI` 在开发安装时为 `file:///` 路径，正式安装后为 `jar:file:///...xpi!/`；
+- 官方 `zotero/zotero-plugin-template` 仓库已删除（404 验证）；官方示例为纯 JS 的
+  `zotero/make-it-red`，TS 社区标准模板为 `windingwind/zotero-plugin-template`
+  （构建链：zotero-plugin-scaffold + esbuild）；本插件采用与 make-it-red 相同的
+  bootstrap 模式 + 自建 esbuild 构建脚本；
 - bootstrap 作用域中可直接使用全局 `Zotero`、`Services`、`Components`、`IOUtils` 等
   （Zotero 7 文档与官方 make-it-red 示例确认）；
 - 构建产物通过 `loadSubScript` 注入 bootstrap 作用域，模块代码用普通 script 全局模式

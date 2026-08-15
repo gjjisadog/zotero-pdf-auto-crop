@@ -19,7 +19,7 @@ import { DEFAULT_CROP_CONFIG } from '../crop/crop-model';
 import { analyzePagePixels, type PixelAnalyzeOptions } from '../crop/page-analyzer';
 import { computePageCrops } from '../crop/stabilization';
 import { analyzeLayout } from '../crop/document-layout';
-import { ANALYSIS_DPI, type PdfDocumentHandle, type PdfOpenOptions, openPdfDocument, contentBoxToMediaBoxCoords, pixelsToDisplayPt } from '../pdf/pdf-reader';
+import { ANALYSIS_DPI, type PdfDocumentHandle, type PdfOpenOptions, openPdfDocument, contentBoxToMediaBoxCoords } from '../pdf/pdf-reader';
 import { PdfWriter, type PageBoxes } from '../pdf/pdf-writer';
 import { createRestoreMetadata, type RestoreMetadata } from '../pdf/crop-metadata';
 import { SafeReplacer, type FileSystem } from '../utils/temp-file';
@@ -96,7 +96,7 @@ export class CropService {
     try {
       writer = await PdfWriter.open(data);
     } catch (e: any) {
-      if (e?.name === 'EncryptedPDFError') {
+      if (String(e?.message).includes('encrypted')) {
         throw new CropError('encrypted', '此 PDF 已加密，插件不会修改受保护的 PDF。', e);
       }
       throw new CropError('damaged', 'PDF 解析失败，原文件未做任何修改。', e);
@@ -167,7 +167,12 @@ export class CropService {
       await this.verifyOutput(outBytes, pageCount, pageCrops);
 
       // 9. 原子替换
-      const tempPath = await replacer.stage(targetPath, outBytes);
+      let tempPath: string;
+      try {
+        tempPath = await replacer.stage(targetPath, outBytes);
+      } catch (e) {
+        throw new CropError('io', '写入临时文件失败，原文件未做任何修改。', e);
+      }
       try {
         await replacer.replace(tempPath, targetPath);
       } catch (e) {
@@ -196,7 +201,7 @@ export class CropService {
     try {
       writer = await PdfWriter.open(data);
     } catch (e: any) {
-      if (e?.name === 'EncryptedPDFError') {
+      if (String(e?.message).includes('encrypted')) {
         throw new CropError('encrypted', '此 PDF 已加密，插件不会修改受保护的 PDF。', e);
       }
       throw new CropError('damaged', 'PDF 解析失败，原文件未做任何修改。', e);
@@ -238,7 +243,12 @@ export class CropService {
     const outBytes = await writer.save();
     await this.verifyOutput(outBytes, pageCount, null);
 
-    const tempPath = await replacer.stage(targetPath, outBytes);
+    let tempPath: string;
+    try {
+      tempPath = await replacer.stage(targetPath, outBytes);
+    } catch (e) {
+      throw new CropError('io', '写入临时文件失败，原文件未做任何修改。', e);
+    }
     try {
       await replacer.replace(tempPath, targetPath);
     } catch (e) {
@@ -281,6 +291,7 @@ export class CropService {
             contentBox: null,
             rotation,
             isBlank: false,
+            darkBackground: false,
             isOutlier: false,
             analysisFailed: true,
           };
@@ -288,9 +299,16 @@ export class CropService {
           const view = await pdfHandle.getView(i + 1);
           const rendered = await pdfHandle.renderPage(i + 1, dpi);
           const px = analyzePagePixels(rendered, pixelOptions);
+          // analyzePagePixels 已返回显示坐标（左下原点，y 向上，像素单位）：
+          // 除以 scale 转为 pt 后，从显示坐标映射回未旋转 MediaBox 坐标
           const contentBox = px.contentBox
             ? contentBoxToMediaBoxCoords(
-                pixelsToDisplayPt(rendered, px.contentBox, rendered.scale),
+                {
+                  left: px.contentBox.left / rendered.scale,
+                  bottom: px.contentBox.bottom / rendered.scale,
+                  right: px.contentBox.right / rendered.scale,
+                  top: px.contentBox.top / rendered.scale,
+                },
                 view,
                 rotation
               )
@@ -302,6 +320,7 @@ export class CropService {
             contentBox,
             rotation,
             isBlank: px.contentBox === null,
+            darkBackground: px.backgroundGray < config.darkBackgroundGray,
             isOutlier: false,
             analysisFailed: false,
           };
@@ -315,6 +334,7 @@ export class CropService {
           contentBox: null,
           rotation,
           isBlank: false,
+          darkBackground: false,
           isOutlier: false,
           analysisFailed: true,
         };

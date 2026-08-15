@@ -56,8 +56,9 @@ export async function openPdfDocument(
   options: PdfOpenOptions = {}
 ): Promise<PdfDocumentHandle> {
   const pdfjsLib: any = await loadPdfJs();
+  // pdf.js 会 transfer（detach）传入的 buffer；复制一份以免破坏调用方数据
   const pdf = await pdfjsLib.getDocument({
-    data,
+    data: new Uint8Array(data),
     standardFontDataUrl: options.standardFontDataUrl,
   }).promise;
   const backend = options.canvasBackend ?? createDefaultCanvasBackend();
@@ -137,16 +138,15 @@ export class PdfJsDocument implements PdfDocumentHandle {
         scale = MAX_RENDER_DIM / maxDim;
       }
       const renderViewport = page.getViewport({ scale });
-      const canvas: any = this.backend.createCanvas(
-        Math.ceil(renderViewport.width),
-        Math.ceil(renderViewport.height)
-      );
+      const cw = Math.ceil(renderViewport.width);
+      const ch = Math.ceil(renderViewport.height);
+      const canvas: any = this.backend.createCanvas(cw, ch);
       const ctx = canvas.getContext('2d');
       await page.render({ canvasContext: ctx, viewport: renderViewport }).promise;
-      const image = ctx.getImageData(0, 0, renderViewport.width, renderViewport.height);
+      const image = ctx.getImageData(0, 0, cw, ch);
       return {
-        width: renderViewport.width,
-        height: renderViewport.height,
+        width: cw,
+        height: ch,
         data: new Uint8ClampedArray(image.data),
         scale,
       };

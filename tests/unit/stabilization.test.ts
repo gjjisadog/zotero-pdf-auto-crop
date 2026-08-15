@@ -25,6 +25,7 @@ function paperPage(
     contentBox: opts.blank ? null : content,
     rotation: opts.rotation ?? 0,
     isBlank: !!opts.blank,
+    darkBackground: false,
     isOutlier: !!opts.outlier,
     analysisFailed: false,
   };

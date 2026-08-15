@@ -81,8 +81,8 @@ export function computePageCrops(
 
   for (const group of layout.groups) {
     const kind: PageGroupKind = group.kind;
-    if (kind === 'blank') {
-      // 空白页/失败页：不动
+    if (kind === 'blank' || kind === 'dark') {
+      // 空白页/失败页/深色背景页：不动
       for (const idx of group.pageIndexes) {
         const a = analyses[idx];
         result.push({
