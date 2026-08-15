@@ -21,6 +21,7 @@
     "@napi-rs/canvas": "^0.1.65",
     "@types/node": "^22.10.0",
     "esbuild": "^0.24.0",
+    "fflate": "^0.8.3",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0",
     "zotero-types": "^4.1.3"

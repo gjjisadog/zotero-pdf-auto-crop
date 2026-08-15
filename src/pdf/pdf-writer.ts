@@ -10,7 +10,7 @@
  * 裁剪策略：只写 CropBox（并同步已存在的 Trim/Bleed/Art），MediaBox 保持不变
  * （更保守：内容坐标与 MediaBox 完全不动）。
  */
-import { PDFDocument, PDFName, PDFArray, type PDFPageLeaf } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFArray, PDFDict, type PDFPageLeaf } from 'pdf-lib';
 import type { PageBox } from '../crop/bounding-box';
 import { boxFromRect, boxToRect } from '../crop/bounding-box';
 import {
@@ -43,6 +43,38 @@ export class PdfWriter {
   /** 页面旋转（0/90/180/270，顺时针） */
   getPageRotation(index: number): number {
     return this.doc.getPage(index).getRotation().angle as number;
+  }
+
+  /**
+   * 页面是否引用「非嵌入字体」（标准 14 字体或无 FontFile 流的字体）。
+   * 此类字体在渲染环境缺字体数据时不会画出，导致内容盒漏检 → 该页应标记
+   * 分析失败（不裁剪，安全优先）。Type3 字体自包含，不算。
+   */
+  hasNonEmbeddedFont(index: number): boolean {
+    const page = this.doc.getPage(index);
+    const resources = (page.node as any).Resources();
+    if (!(resources instanceof PDFDict)) return false;
+    const fontDict = resources.get(PDFName.of('Font'));
+    if (!(fontDict instanceof PDFDict)) return false;
+    for (const name of fontDict.keys()) {
+      const font = this.doc.context.lookup(fontDict.get(name));
+      if (!(font instanceof PDFDict)) continue;
+      if (font.get(PDFName.of('Subtype')) instanceof PDFName
+        && font.get(PDFName.of('Subtype')) === PDFName.of('Type3')) {
+        continue; // Type3 自包含字形
+      }
+      const desc = font.get(PDFName.of('FontDescriptor'));
+      const descDict = desc ? this.doc.context.lookup(desc) : undefined;
+      if (!(descDict instanceof PDFDict)) {
+        return true; // 无 FontDescriptor = 未嵌入
+      }
+      if (!descDict.get(PDFName.of('FontFile'))
+        && !descDict.get(PDFName.of('FontFile2'))
+        && !descDict.get(PDFName.of('FontFile3'))) {
+        return true; // 有描述符但无字体文件流 = 未嵌入
+      }
+    }
+    return false;
   }
 
   private getPageNode(index: number): PDFPageLeaf {

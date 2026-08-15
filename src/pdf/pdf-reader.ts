@@ -76,7 +76,7 @@ async function loadPdfJs(): Promise<any> {
 }
 
 /** 默认画布后端：环境探测（浏览器 OffscreenCanvas → DOM canvas → Node canvas） */
-function createDefaultCanvasBackend(): CanvasBackend {
+export function createDefaultCanvasBackend(): CanvasBackend {
   const g = globalThis as any;
   if (typeof g.OffscreenCanvas === 'function') {
     return {

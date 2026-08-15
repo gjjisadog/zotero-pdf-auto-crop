@@ -1,0 +1,20 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero PDF Auto Crop",
+  "version": "0.1.0",
+  "description": "自动检测并裁剪 PDF 白边：通过修改页面 CropBox 实现非栅格化、可恢复的智能裁剪，提升平板/墨水屏阅读显示比例。不破坏内容、批注与文本层，无需任何外部依赖。",
+  "author": "Zotero PDF Auto Crop",
+  "homepage_url": "https://github.com/zotero-pdf-auto-crop/zotero-pdf-auto-crop",
+  "icons": {
+    "48": "content/icons/icon-48.png",
+    "96": "content/icons/icon-96.png"
+  },
+  "applications": {
+    "zotero": {
+      "id": "zotero-pdf-auto-crop@zotero.org",
+      "update_url": "",
+      "strict_min_version": "7.0",
+      "strict_max_version": "9.*"
+    }
+  }
+}

@@ -4,7 +4,8 @@
  * 流程（任务 §24–§25）：写入同目录临时文件 → 校验 → 原子替换原文件。
  * 任何一步失败：原文件完全不变，临时文件被清理。
  *
- * 文件系统抽象为接口：Node（测试）用 fs/promises，Zotero 用 IOUtils。
+ * 文件系统抽象为接口：Node（测试）用 temp-file-node.ts 的 NodeFileSystem，
+ * Zotero 用本文件的 ZoteroFileSystem（IOUtils）。
  * 临时文件与目标文件必须在同一目录（保证 rename 的原子性）。
  */
 
@@ -21,40 +22,6 @@ export interface FileSystem {
   remove(path: string): Promise<void>;
   exists(path: string): Promise<boolean>;
   stat(path: string): Promise<FileStats>;
-}
-
-/** Node 实现（测试/开发） */
-export class NodeFileSystem implements FileSystem {
-  async readFile(path: string): Promise<Uint8Array> {
-    const { readFile } = await import('node:fs/promises');
-    return new Uint8Array(await readFile(path));
-  }
-  async writeFile(path: string, data: Uint8Array): Promise<void> {
-    const { writeFile } = await import('node:fs/promises');
-    await writeFile(path, data);
-  }
-  async moveReplace(src: string, dest: string): Promise<void> {
-    const { rename } = await import('node:fs/promises');
-    await rename(src, dest); // POSIX 与 Windows NTFS 下同卷 rename 均为原子覆盖
-  }
-  async remove(path: string): Promise<void> {
-    const { rm } = await import('node:fs/promises');
-    await rm(path, { force: true });
-  }
-  async exists(path: string): Promise<boolean> {
-    const { access } = await import('node:fs/promises');
-    try {
-      await access(path);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  async stat(path: string): Promise<FileStats> {
-    const { stat } = await import('node:fs/promises');
-    const s = await stat(path);
-    return { size: s.size, lastModified: s.mtimeMs };
-  }
 }
 
 /** Zotero 实现（IOUtils） */

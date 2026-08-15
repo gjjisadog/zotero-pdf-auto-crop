@@ -271,26 +271,41 @@ export class CropService {
       const rotation = writer.getPageRotation(i);
       let analysis: PageAnalysis;
       try {
-        const view = await pdfHandle.getView(i + 1);
-        const rendered = await pdfHandle.renderPage(i + 1, dpi);
-        const px = analyzePagePixels(rendered, pixelOptions);
-        const contentBox = px.contentBox
-          ? contentBoxToMediaBoxCoords(
-              pixelsToDisplayPt(rendered, px.contentBox, rendered.scale),
-              view,
-              rotation
-            )
-          : null;
-        analysis = {
-          pageIndex: i,
-          mediaBox: boxes.media,
-          cropBox: boxes.crop,
-          contentBox,
-          rotation,
-          isBlank: px.contentBox === null,
-          isOutlier: false,
-          analysisFailed: false,
-        };
+        // 非嵌入字体页：渲染可能缺字导致内容盒漏检 → 标记失败（不裁剪，安全优先）
+        if (config.requireEmbeddedFonts && writer.hasNonEmbeddedFont(i)) {
+          log.debug(`Page ${i + 1} uses non-embedded fonts; marking as failed (safe)`);
+          analysis = {
+            pageIndex: i,
+            mediaBox: boxes.media,
+            cropBox: boxes.crop,
+            contentBox: null,
+            rotation,
+            isBlank: false,
+            isOutlier: false,
+            analysisFailed: true,
+          };
+        } else {
+          const view = await pdfHandle.getView(i + 1);
+          const rendered = await pdfHandle.renderPage(i + 1, dpi);
+          const px = analyzePagePixels(rendered, pixelOptions);
+          const contentBox = px.contentBox
+            ? contentBoxToMediaBoxCoords(
+                pixelsToDisplayPt(rendered, px.contentBox, rendered.scale),
+                view,
+                rotation
+              )
+            : null;
+          analysis = {
+            pageIndex: i,
+            mediaBox: boxes.media,
+            cropBox: boxes.crop,
+            contentBox,
+            rotation,
+            isBlank: px.contentBox === null,
+            isOutlier: false,
+            analysisFailed: false,
+          };
+        }
       } catch (e) {
         log.warn(`Page ${i + 1} analysis failed: ${(e as Error).message}`);
         analysis = {

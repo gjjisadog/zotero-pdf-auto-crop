@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, readFile, writeFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NodeFileSystem, SafeReplacer } from '../../src/utils/temp-file';
+import { SafeReplacer } from '../../src/utils/temp-file';
+import { NodeFileSystem } from '../../src/utils/temp-file-node';
 
 describe('temp-file (atomic replace)', () => {
   let dir: string;
