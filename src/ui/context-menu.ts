@@ -20,6 +20,7 @@ import { isCropableItem, readAttachmentBytes, getAttachmentPath } from '../zoter
 import { reloadReadersForItem } from '../zotero/reader-service';
 import { notifyAttachmentFileChanged } from '../zotero/sync-service';
 import { createProgressWindow, type ProgressHandle } from '../zotero/progress';
+import { appendOperationLog } from '../zotero/operation-log';
 import { log } from '../utils/logger';
 
 /** 插件 ID（与 manifest applications.zotero.id 一致） */
@@ -121,6 +122,7 @@ async function runWithSinglePdf(context: any, action: 'crop' | 'restore'): Promi
     progress = createProgressWindow(action === 'crop' ? '自动裁剪 PDF 白边' : '恢复原始页面');
     const path = await getAttachmentPath(item);
     const data = await readAttachmentBytes(item);
+    await appendOperationLog({ action, itemKey: item.libraryKey, path, stage: 'start' });
     const service = new CropService();
 
     if (action === 'crop') {
@@ -145,9 +147,11 @@ async function runWithSinglePdf(context: any, action: 'crop' | 'restore'): Promi
         progress?.setText(`裁剪完成：${result.changedPageCount}/${result.pageCount} 页`);
         progress?.done();
         log.info(`cropped ${item.libraryKey}: ${result.changedPageCount}/${result.pageCount} pages`);
+        await appendOperationLog({ action, itemKey: item.libraryKey, path, stage: 'done', status: result.status, pageCount: result.pageCount, changed: result.changedPageCount, message: result.message });
       } else if (result.status === 'no-change') {
         progress?.setText('未检测到需要裁剪的白边');
         progress?.done();
+        await appendOperationLog({ action, itemKey: item.libraryKey, path, stage: 'done', status: result.status, pageCount: result.pageCount, message: result.message });
       }
     } else {
       const result = await service.restorePdf({
@@ -164,9 +168,11 @@ async function runWithSinglePdf(context: any, action: 'crop' | 'restore'): Promi
         await afterFileReplaced(item);
         progress?.setText(`恢复完成：${result.changedPageCount}/${result.pageCount} 页`);
         progress?.done();
+        await appendOperationLog({ action, itemKey: item.libraryKey, path, stage: 'done', status: result.status, pageCount: result.pageCount, changed: result.changedPageCount, message: result.message });
       } else if (result.status === 'no-change') {
         progress?.setText('页面已是原始状态');
         progress?.done();
+        await appendOperationLog({ action, itemKey: item.libraryKey, path, stage: 'done', status: result.status, message: result.message });
       }
     }
   } catch (e) {
@@ -174,11 +180,14 @@ async function runWithSinglePdf(context: any, action: 'crop' | 'restore'): Promi
     if (e instanceof CropError) {
       log.warn(`crop failed (${e.kind}): ${e.message}`);
       alertError(e.message);
+      await appendOperationLog({ action, itemKey: item.libraryKey, stage: 'error', kind: e.kind, message: e.message });
     } else if (e instanceof Error) {
       log.error('operation failed', e);
       alertError(`操作失败：${e.message}\n\n原 PDF 未被修改。`);
+      await appendOperationLog({ action, itemKey: item.libraryKey, stage: 'error', message: e.message });
     } else {
       alertError('操作失败：未知错误。\n\n原 PDF 未被修改。');
+      await appendOperationLog({ action, itemKey: item.libraryKey, stage: 'error', message: String(e) });
     }
   } finally {
     running = false;

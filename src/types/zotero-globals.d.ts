@@ -4,6 +4,7 @@
  */
 declare const IOUtils: {
   read(path: string): Promise<Uint8Array>;
+  readDirectory(path: string): Promise<{ name: string; type: string }[]>;
   write(path: string, data: Uint8Array, options?: { mode?: number; flush?: boolean }): Promise<void>;
   move(src: string, dest: string, options?: { noOverwrite?: boolean }): Promise<void>;
   remove(path: string, options?: { ignoreAbsent?: boolean; recursive?: boolean }): Promise<void>;

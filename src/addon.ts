@@ -5,6 +5,7 @@
  * 模块间通过闭包与单例交互，不依赖全局状态。
  */
 import { registerContextMenu, unregisterContextMenu, STANDARD_FONTS_URL } from './ui/context-menu';
+import { appendOperationLog } from './zotero/operation-log';
 import { useZoteroLogger, log } from './utils/logger';
 import { CropService, type CropResult } from './crop/crop-service';
 import type { CropConfig } from './crop/crop-model';
@@ -101,7 +102,7 @@ export class Addon {
     const fs = new ZoteroFileSystem();
     const data = await fs.readFile(path);
     const service = new CropService();
-    return service.cropPdf({
+    const r = await service.cropPdf({
       data,
       targetPath: path,
       fs,
@@ -109,8 +110,10 @@ export class Addon {
         standardFontDataUrl: STANDARD_FONTS_URL,
         canvasBackend: createDefaultCanvasBackend(),
       },
-      config: { requireEmbeddedFonts: true, ...config },
+      config: { ...config },
     });
+    await appendOperationLog({ action: 'crop', path, status: r.status, pageCount: r.pageCount, changed: r.changedPageCount, message: r.message });
+    return r;
   }
 
   /** 程序化恢复入口（文件路径） */
@@ -119,7 +122,7 @@ export class Addon {
     const fs = new ZoteroFileSystem();
     const data = await fs.readFile(path);
     const service = new CropService();
-    return service.restorePdf({
+    const r = await service.restorePdf({
       data,
       targetPath: path,
       fs,
@@ -128,26 +131,38 @@ export class Addon {
         canvasBackend: createDefaultCanvasBackend(),
       },
     });
+    await appendOperationLog({ action: 'restore', path, status: r.status, pageCount: r.pageCount, changed: r.changedPageCount, message: r.message });
+    return r;
   }
 
   /**
+   * 操作日志：追加到 profile/zpac-operations.log（最近 500 行）。
+   * 用于诊断实际使用中的问题（正常模式下 Zotero 无文件日志）。
+   */
+  /**
    * prefs 驱动的自检：设置 extensions.zotero.zpac.debugCropPath /
-   * debugRestorePath 后重启，插件自动对指定文件执行裁剪/恢复并输出日志。
-   * 用于自动化验证与 V2 自动裁剪的同一管线；执行后自动清除 prefs。
+   * debugRestorePath / debugCropDir 后重启，插件自动对指定文件/目录执行
+   * 裁剪/恢复并输出日志。用于自动化验证与 V2 自动裁剪的同一管线；
+   * 执行后自动清除 prefs。
    */
   private async runPrefDrivenSelfTest(): Promise<void> {
     // Zotero.Prefs.get/set 自动加 extensions.zotero. 前缀
     const PREFIX = 'zpac.debug';
     let ran = false;
     try {
-      const cropPath = Zotero.Prefs.get(`${PREFIX}CropPath`) as string;
+      const cropPaths = (Zotero.Prefs.get(`${PREFIX}CropPaths`) as string) ?? '';
       const restorePath = Zotero.Prefs.get(`${PREFIX}RestorePath`) as string;
-      if (cropPath) {
+      // 逗号分隔的文件列表（避免依赖 IOUtils.readDirectory）
+      const paths = cropPaths.split(',').map((x) => x.trim()).filter(Boolean);
+      for (const p of paths) {
         ran = true;
-        log.info(`self-test crop: ${cropPath}`);
-        // 实验：允许非嵌入字体渲染，验证 chrome:// standard fonts 可用性
-        const r = await this.cropFile(cropPath, { requireEmbeddedFonts: false });
-        log.info(`self-test crop result: ${JSON.stringify(r)}`);
+        log.info(`self-test crop: ${p}`);
+        try {
+          const r = await this.cropFile(p);
+          log.info(`self-test crop result (${p}): ${JSON.stringify(r)}`);
+        } catch (err) {
+          log.error(`self-test crop failed (${p})`, err);
+        }
       }
       if (restorePath) {
         ran = true;
@@ -159,7 +174,7 @@ export class Addon {
       log.error('self-test failed', e);
     } finally {
       if (ran) {
-        Zotero.Prefs.set(`${PREFIX}CropPath`, '');
+        Zotero.Prefs.set(`${PREFIX}CropPaths`, '');
         Zotero.Prefs.set(`${PREFIX}RestorePath`, '');
       }
     }
