@@ -112,3 +112,74 @@ describe('page-analyzer', () => {
     expect(pdf.top).toBeCloseTo(108, 5);
   });
 });
+
+describe('page-analyzer: 扫描黑边置信度（H1-1）', () => {
+  const W = 100, H = 100;
+
+  it('均匀近黑贴边带（扫描黑边）→ 高置信度伪影，从内容中排除', () => {
+    // 左缘 4px 满高黑带 + 内部内容块
+    const img = makeImage(W, H, [
+      { x: 0, y: 0, w: 4, h: 100, gray: 25 },
+      { x: 30, y: 40, w: 20, h: 20 },
+    ]);
+    const res = analyzePagePixels({ width: W, height: H, data: img });
+    expect(res.rawContentBox!.left).toBe(0);       // raw 包含黑带
+    expect(res.cleanedContentBox!.left).toBe(30);  // 排除黑带后从内容块开始
+    expect(res.contentBox!.left).toBe(30);
+  });
+
+  it('均匀中灰贴边带（明显暗于背景）→ 也判为伪影排除', () => {
+    const img = makeImage(W, H, [
+      { x: 0, y: 0, w: 4, h: 100, gray: 190 },     // bg=255，暗 65
+      { x: 30, y: 40, w: 20, h: 20 },
+    ]);
+    const res = analyzePagePixels({ width: W, height: H, data: img });
+    expect(res.contentBox!.left).toBe(30);
+  });
+
+  it('纹理复杂的贴边照片条 → 不排除（真实内容）', () => {
+    const img = makeImage(W, H, [
+      // 4x4 灰度块模拟照片纹理（相邻块灰度差异大 → 带内方差高）
+      ...Array.from({ length: 25 }, (_, i) => ({
+        x: (i % 5) * 4, y: Math.floor(i / 5) * 20, w: 4, h: 20,
+        gray: (i * 89) % 230 + 10,
+      })),
+      { x: 30, y: 40, w: 20, h: 20 },
+    ]);
+    const res = analyzePagePixels({ width: W, height: H, data: img });
+    expect(res.rawContentBox!.left).toBe(0);
+    expect(res.cleanedContentBox!.left).toBe(0);   // 未被排除
+    expect(res.contentBox!.left).toBe(0);
+  });
+
+  it('多色段贴边色条 → 不排除（真实内容）', () => {
+    const img = makeImage(W, H, [
+      { x: 0, y: 0, w: 4, h: 25, gray: 88 },
+      { x: 0, y: 25, w: 4, h: 25, gray: 113 },
+      { x: 0, y: 50, w: 4, h: 25, gray: 70 },
+      { x: 0, y: 75, w: 4, h: 25, gray: 191 },
+      { x: 30, y: 40, w: 20, h: 20 },
+    ]);
+    const res = analyzePagePixels({ width: W, height: H, data: img });
+    expect(res.contentBox!.left).toBe(0);
+  });
+
+  it('浅色均匀贴边带（接近背景）→ 不排除', () => {
+    const img = makeImage(W, H, [
+      { x: 0, y: 0, w: 4, h: 100, gray: 240 },     // bg=255，暗 15 < 25
+      { x: 30, y: 40, w: 20, h: 20 },
+    ]);
+    const res = analyzePagePixels({ width: W, height: H, data: img });
+    expect(res.contentBox!.left).toBe(0);
+  });
+
+  it('均匀暗带但过宽（>5%）→ 只排除封顶的 5%，内侧保留（保守）', () => {
+    const img = makeImage(W, H, [
+      { x: 0, y: 0, w: 8, h: 100, gray: 25 },      // 8% > darkBandMaxFraction 5%
+      { x: 40, y: 40, w: 20, h: 20 },
+    ]);
+    const res = analyzePagePixels({ width: W, height: H, data: img });
+    // darkBandMaxFraction 封顶 5px：外侧 5px 排除、内侧 3px 仍视为内容
+    expect(res.contentBox!.left).toBe(5);
+  });
+});

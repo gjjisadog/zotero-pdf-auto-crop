@@ -4,6 +4,8 @@
  * 全部由 pdf-lib 程序化生成（无版权问题）。特征与任务 §44 对应：
  * 01 普通论文 / 02 双栏 / 03 大边距 / 04 扫描件（灰度 PNG+噪点，无文本层）
  * 05 书籍奇偶 / 06 横向页 / 07 混合尺寸 / 08 整页图 / 09 小边距 / 10 内嵌批注+书签
+ * 11 非零 MediaBox / 12 负原点+旋转 / 13 继承 CropBox / 14 同尺寸不同原点
+ * 15 贴边照片条 / 16 贴边色条 / 17 扫描黑边 / 18 直接间接 CropBox / 19 继承间接 CropBox
  *
  * 运行: node scripts/generate-fixtures.mjs
  */
@@ -77,12 +79,17 @@ function makeScannedPageImage(wPt, hPt, seed = 1) {
     ctx.fillStyle = `rgb(${g},${g},${g})`;
     ctx.fillRect(Math.floor(rand() * w), Math.floor(rand() * h), 1, 1);
   }
-  // 边缘阴影（左/上渐变带）
-  const shade = ctx.createLinearGradient(0, 0, Math.round(w * 0.04), 0);
-  shade.addColorStop(0, 'rgba(80,80,80,0.25)');
-  shade.addColorStop(1, 'rgba(80,80,80,0)');
-  ctx.fillStyle = shade;
-  ctx.fillRect(0, 0, Math.round(w * 0.04), h);
+  // 边缘阴影：近页缘为暗灰平带（扫描阴影），向内渐变过渡到纸色。
+  // 形态接近真实扫描件：均匀暗带 + 短渐变 → 暗带置信度判定（均匀 + 明显暗于背景）可识别。
+  const shadeW = Math.round(w * 0.04);
+  const flat = Math.round(shadeW * 0.6);
+  ctx.fillStyle = 'rgba(90,90,90,0.35)';
+  ctx.fillRect(0, 0, flat, h);
+  const fade = ctx.createLinearGradient(flat, 0, shadeW, 0);
+  fade.addColorStop(0, 'rgba(90,90,90,0.35)');
+  fade.addColorStop(1, 'rgba(90,90,90,0)');
+  ctx.fillStyle = fade;
+  ctx.fillRect(flat, 0, shadeW - flat, h);
   // 正文块（黑色矩形模拟文字行）
   ctx.fillStyle = 'rgb(30,30,30)';
   const m = 70 * scale;
@@ -360,6 +367,143 @@ function makeScannedPageImage(wPt, hPt, seed = 1) {
   p2.setMediaBox(-20, -30, 612, 792);
   draw(p2, -20, -30);
   await writeFile(join(OUT, '14-mixed-mediabox-origin-same-size.pdf'), await doc.save());
+}
+
+// ---------- 15 贴边照片条（左缘 4% 满高、纹理复杂，真实内容不能被当扫描伪影裁掉） ----------
+{
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const stripFrac = 0.04;
+  for (let p = 0; p < 2; p++) {
+    const page = doc.addPage(LETTER);
+    const [w, h] = [page.getWidth(), page.getHeight()];
+    const stripW = w * stripFrac;
+    const scale = 100 / 72;
+    const c = createCanvas(Math.round(w * scale), Math.round(h * scale));
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = 'rgb(247,246,242)';
+    ctx.fillRect(0, 0, c.width, c.height);
+    let s = 99 + p;
+    const rand = () => ((s = (s * 1103515245 + 12345) % 2147483648) / 2147483648);
+    // 照片条：随机灰度块（纹理丰富 → 灰度方差高）
+    const sw = Math.round(stripW * scale);
+    for (let y = 0; y < c.height; y += 8) {
+      for (let x = 0; x < sw; x += 8) {
+        const g = 40 + Math.floor(rand() * 180);
+        ctx.fillStyle = `rgb(${g},${g},${g})`;
+        ctx.fillRect(x, y, 8, 8);
+      }
+    }
+    const png = c.toBuffer('image/png');
+    const image = await doc.embedPng(png);
+    page.drawImage(image, { x: 0, y: 0, width: w, height: h });
+    page.drawText('Edge photo strip page', { x: 90, y: 700, size: 16, font, color: INK });
+    for (let i = 0; i < 18; i++) {
+      page.drawText(`Line ${i + 1}: lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor.`,
+        { x: 90, y: 660 - i * 14, size: 10, font, color: INK, maxWidth: 440 });
+    }
+  }
+  await writeFile(join(OUT, '15-edge-photo.pdf'), await doc.save());
+}
+
+// ---------- 16 贴边色条（出版社色条：左缘 4% 满高、多色段，真实内容不能被裁掉） ----------
+{
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const stripFrac = 0.04;
+  for (let p = 0; p < 2; p++) {
+    const page = doc.addPage(LETTER);
+    const [w, h] = [page.getWidth(), page.getHeight()];
+    const stripW = w * stripFrac;
+    const scale = 100 / 72;
+    const c = createCanvas(Math.round(w * scale), Math.round(h * scale));
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = 'rgb(247,246,242)';
+    ctx.fillRect(0, 0, c.width, c.height);
+    // 色条：四个饱和度不同的色段（灰度值差异大 → 方差高）
+    const sw = Math.round(stripW * scale);
+    const segH = c.height / 4;
+    const colors = ['rgb(200,40,40)', 'rgb(40,160,60)', 'rgb(40,60,200)', 'rgb(230,200,40)'];
+    colors.forEach((col, i) => {
+      ctx.fillStyle = col;
+      ctx.fillRect(0, Math.round(i * segH), sw, Math.ceil(segH));
+    });
+    const png = c.toBuffer('image/png');
+    const image = await doc.embedPng(png);
+    page.drawImage(image, { x: 0, y: 0, width: w, height: h });
+    page.drawText('Edge color bar page', { x: 90, y: 700, size: 16, font, color: INK });
+    for (let i = 0; i < 18; i++) {
+      page.drawText(`Line ${i + 1}: lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor.`,
+        { x: 90, y: 660 - i * 14, size: 10, font, color: INK, maxWidth: 440 });
+    }
+  }
+  await writeFile(join(OUT, '16-edge-color-bar.pdf'), await doc.save());
+}
+
+// ---------- 17 扫描黑边（左缘 3% 近黑均匀带：高置信度扫描伪影，允许排除） ----------
+{
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const borderFrac = 0.03;
+  for (let p = 0; p < 2; p++) {
+    const page = doc.addPage(LETTER);
+    const [w, h] = [page.getWidth(), page.getHeight()];
+    const scale = 100 / 72;
+    const c = createCanvas(Math.round(w * scale), Math.round(h * scale));
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = 'rgb(247,246,242)';
+    ctx.fillRect(0, 0, c.width, c.height);
+    // 均匀近黑黑边（灰度 ≈ 25，无纹理）
+    ctx.fillStyle = 'rgb(25,25,25)';
+    ctx.fillRect(0, 0, Math.round(w * scale * borderFrac), c.height);
+    const png = c.toBuffer('image/png');
+    const image = await doc.embedPng(png);
+    page.drawImage(image, { x: 0, y: 0, width: w, height: h });
+    page.drawText('Scan black border page', { x: 90, y: 700, size: 16, font, color: INK });
+    for (let i = 0; i < 18; i++) {
+      page.drawText(`Line ${i + 1}: lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor.`,
+        { x: 90, y: 660 - i * 14, size: 10, font, color: INK, maxWidth: 440 });
+    }
+  }
+  await writeFile(join(OUT, '17-scan-black-border.pdf'), await doc.save());
+}
+
+// ---------- 18 直接 CropBox 用间接引用（/CropBox 12 0 R → [20 20 592 772]） ----------
+{
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const cropArr = doc.context.obj([20, 20, 592, 772]);
+  const cropRef = doc.context.register(cropArr);
+  for (let p = 0; p < 2; p++) {
+    const page = doc.addPage([612, 792]);
+    // 页面节点直接设置间接引用的 CropBox
+    page.node.set(PDFName.of('CropBox'), cropRef);
+    page.drawText('Direct indirect cropbox title', { x: 100, y: 700, size: 16, font, color: INK });
+    for (let i = 0; i < 18; i++) {
+      page.drawText(`Line ${i + 1}: lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt.`,
+        { x: 100, y: 660 - i * 14, size: 10, font, color: INK, maxWidth: 450 });
+    }
+  }
+  await writeFile(join(OUT, '18-direct-indirect-cropbox.pdf'), await doc.save());
+}
+
+// ---------- 19 继承 CropBox 用间接引用（父 Pages /CropBox 12 0 R） ----------
+{
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const cropArr = doc.context.obj([20, 20, 592, 772]);
+  const cropRef = doc.context.register(cropArr);
+  const pages = doc.catalog.Pages();
+  pages.set(PDFName.of('CropBox'), cropRef);
+  for (let p = 0; p < 2; p++) {
+    const page = doc.addPage([612, 792]);
+    page.drawText('Inherited indirect cropbox title', { x: 100, y: 700, size: 16, font, color: INK });
+    for (let i = 0; i < 18; i++) {
+      page.drawText(`Line ${i + 1}: lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt.`,
+        { x: 100, y: 660 - i * 14, size: 10, font, color: INK, maxWidth: 450 });
+    }
+  }
+  await writeFile(join(OUT, '19-inherited-indirect-cropbox.pdf'), await doc.save());
 }
 
 console.log('fixtures generated in', OUT);

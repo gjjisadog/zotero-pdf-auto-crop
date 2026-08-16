@@ -8,7 +8,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { PDFDocument, PDFName, PDFArray } from 'pdf-lib';
 import {
   makeContext, cleanupContext, copyFixture, runCrop, runRestore, openPdf,
-  renderAndAnalyze, type TestContext,
+  renderAndAnalyze, STD_FONTS_PATH, type TestContext,
 } from './helpers';
 import { CropService } from '../../src/crop/crop-service';
 import type { FileSystem } from '../../src/utils/temp-file';
@@ -133,7 +133,8 @@ describe('integration: source modified during processing (H1)', () => {
         targetPath: path,
         fs: tamperedFs,
         pdfOptions: {
-          standardFontDataUrl: '/Users/wangxuwen/Zotero PDF Auto Crop/node_modules/pdfjs-dist/standard_fonts/',
+          // P1-1：仓库相对路径（CI 上不存在开发机的绝对路径）
+          standardFontDataUrl: STD_FONTS_PATH,
           canvasBackend: {
             createCanvas(w: number, h: number) {
               const { createCanvas } = require('@napi-rs/canvas');

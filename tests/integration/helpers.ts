@@ -88,6 +88,35 @@ export async function runRestore(ctx: TestContext, targetPath: string): Promise<
   });
 }
 
+/**
+ * 生产路径运行裁剪（H1-2：cropFile 只给路径，稳定快照由事务层完成）。
+ */
+export async function runCropFile(ctx: TestContext, targetPath: string, config: any = {}): Promise<CropResult> {
+  const service = new CropService();
+  return service.cropFile({
+    targetPath,
+    fs: ctx.fs,
+    pdfOptions: {
+      standardFontDataUrl: STD_FONTS_PATH,
+      canvasBackend: makeNodeCanvasBackend(),
+    },
+    config: { requireEmbeddedFonts: false, ...config },
+  });
+}
+
+/** 生产路径运行恢复（H1-3） */
+export async function runRestoreFile(ctx: TestContext, targetPath: string): Promise<CropResult> {
+  const service = new CropService();
+  return service.restoreFile({
+    targetPath,
+    fs: ctx.fs,
+    pdfOptions: {
+      standardFontDataUrl: STD_FONTS_PATH,
+      canvasBackend: makeNodeCanvasBackend(),
+    },
+  });
+}
+
 export async function openPdf(data: Uint8Array): Promise<PdfDocumentHandle> {
   return openPdfDocument(data, {
     standardFontDataUrl: STD_FONTS_PATH,
