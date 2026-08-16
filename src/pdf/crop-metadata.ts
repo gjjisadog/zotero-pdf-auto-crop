@@ -14,7 +14,7 @@ import { PDFName, PDFString, PDFDict, PDFStream, decodePDFRawStream, PDFDocument
 import type { PageBox } from '../crop/bounding-box';
 
 export const RESTORE_INFO_KEY = 'ZoteroPdfAutoCropRestore';
-export const RESTORE_XMP_NS = 'https://github.com/zotero-pdf-auto-crop#';
+export const RESTORE_XMP_NS = 'https://github.com/gjjisadog/zotero-pdf-auto-crop#';
 const RESTORE_XMP_TAG = 'zpac:originalBoxes';
 
 export interface RestoreMetadata {
