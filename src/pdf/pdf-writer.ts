@@ -83,26 +83,36 @@ export class PdfWriter {
     return (page as any).node as PDFPageLeaf;
   }
 
-  private readOptionalBox(node: PDFPageLeaf, name: string): PageBox | undefined {
-    const entry = node.get(PDFName.of(name));
-    if (entry instanceof PDFArray) {
-      const rect = entry.asRectangle();
-      return boxFromRect(rect.x, rect.y, rect.width, rect.height);
+  /**
+   * 解析页面盒条目：直接数组或间接引用（/CropBox 12 0 R）都返回 PDFArray
+   * （H2-1：合法 PDF 允许盒用间接引用；instanceof PDFArray 直判会漏判）。
+   */
+  private lookupArray(v: unknown): PDFArray | null {
+    try {
+      const r = this.doc.context.lookupMaybe(v as any, PDFArray);
+      return r instanceof PDFArray ? r : null;
+    } catch {
+      return null;
     }
-    return undefined;
   }
 
-  /** 页面节点自身是否直接设置了 CropBox（不含继承） */
+  private readOptionalBox(node: PDFPageLeaf, name: string): PageBox | undefined {
+    const arr = this.lookupArray(node.get(PDFName.of(name)));
+    if (!arr) return undefined;
+    const rect = arr.asRectangle();
+    return boxFromRect(rect.x, rect.y, rect.width, rect.height);
+  }
+
+  /** 页面节点自身是否直接设置了 CropBox（不含继承；间接引用也算直接设置） */
   hasDirectCropBox(index: number): boolean {
     const node = this.getPageNode(index);
-    return node.get(PDFName.of('CropBox')) instanceof PDFArray;
+    return this.lookupArray(node.get(PDFName.of('CropBox'))) !== null;
   }
 
   /** 页面是否拥有生效的 CropBox（含沿 Page Tree 继承；H2-1） */
   hasEffectiveCropBox(index: number): boolean {
     const node = this.getPageNode(index);
-    const v = node.getInheritableAttribute(PDFName.of('CropBox'));
-    return v instanceof PDFArray;
+    return this.lookupArray(node.getInheritableAttribute(PDFName.of('CropBox'))) !== null;
   }
 
   getPageBoxes(index: number): PageBoxes {
@@ -114,10 +124,11 @@ export class PdfWriter {
       page.getMediaBox().height
     );
     const node = this.getPageNode(index);
-    // effectiveCrop = page.getCropBox()（含继承，缺省 fallback MediaBox）
-    const crop = this.hasEffectiveCropBox(index)
+    // effectiveCrop = 生效的 CropBox（含继承与间接引用；缺省 = MediaBox）
+    const cropArr = this.lookupArray(node.getInheritableAttribute(PDFName.of('CropBox')));
+    const crop = cropArr
       ? (() => {
-          const r = page.getCropBox();
+          const r = cropArr.asRectangle();
           return boxFromRect(r.x, r.y, r.width, r.height);
         })()
       : null;

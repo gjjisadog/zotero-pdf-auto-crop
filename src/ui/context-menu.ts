@@ -16,7 +16,7 @@ import { CropService, CropError } from '../crop/crop-service';
 import { ZoteroFileSystem } from '../utils/temp-file';
 import { createDefaultCanvasBackend } from '../pdf/pdf-reader';
 import { PdfWriter } from '../pdf/pdf-writer';
-import { isCropableItem, readAttachmentBytes, getAttachmentPath } from '../zotero/attachment-service';
+import { isCropableItem, getAttachmentPath, MAX_PDF_BYTES } from '../zotero/attachment-service';
 import { reloadReadersForItem } from '../zotero/reader-service';
 import { notifyAttachmentFileChanged } from '../zotero/sync-service';
 import { createProgressWindow, type ProgressHandle } from '../zotero/progress';
@@ -46,6 +46,8 @@ export function registerContextMenu(): string[] {
           context.setVisible(visible);
           if (visible) {
             context.menuElem.label = '自动裁剪 PDF 白边';
+            // P1-2：菜单对象可能被复用，先恢复默认 enabled，再异步收紧
+            context.setEnabled(true);
           }
         },
         onCommand: (event: unknown, context: any) => {
@@ -59,6 +61,9 @@ export function registerContextMenu(): string[] {
           context.setVisible(visible);
           if (!visible) return;
           context.menuElem.label = '恢复原始页面';
+          // P1-2：先恢复默认 enabled（菜单对象可能复用上一次的 disabled 状态），
+          // 再异步判定收紧
+          context.setEnabled(true);
           // 异步判定：PDF 内是否保存了恢复元数据
           void updateRestoreEnabled(context);
         },
@@ -120,14 +125,25 @@ async function runWithSinglePdf(context: any, action: 'crop' | 'restore'): Promi
   let progress: ProgressHandle | null = null;
   try {
     progress = createProgressWindow(action === 'crop' ? '自动裁剪 PDF 白边' : '恢复原始页面');
+    // H1-2：只取得路径，由 CropService.cropFile/restoreFile 内部完成
+    // 「stat → read → stat 复检」稳定快照——data 与 targetPath 不再分离进入事务
     const path = await getAttachmentPath(item);
-    const data = await readAttachmentBytes(item);
+    const stat = await IOUtils.stat(path);
+    if (stat.size > MAX_PDF_BYTES) {
+      progress?.close();
+      alertError('PDF 文件过大（超过 256 MB），无法安全处理');
+      return;
+    }
+    if (stat.size === 0) {
+      progress?.close();
+      alertError('PDF 文件为空');
+      return;
+    }
     await appendOperationLog({ action, itemKey: item.libraryKey, path, stage: 'start' });
     const service = new CropService();
 
     if (action === 'crop') {
-      const result = await service.cropPdf({
-        data,
+      const result = await service.cropFile({
         targetPath: path,
         fs: new ZoteroFileSystem(),
         pdfOptions: { standardFontDataUrl: STANDARD_FONTS_URL, canvasBackend: createDefaultCanvasBackend() },
@@ -154,8 +170,7 @@ async function runWithSinglePdf(context: any, action: 'crop' | 'restore'): Promi
         await appendOperationLog({ action, itemKey: item.libraryKey, path, stage: 'done', status: result.status, pageCount: result.pageCount, message: result.message });
       }
     } else {
-      const result = await service.restorePdf({
-        data,
+      const result = await service.restoreFile({
         targetPath: path,
         fs: new ZoteroFileSystem(),
         pdfOptions: { standardFontDataUrl: STANDARD_FONTS_URL, canvasBackend: createDefaultCanvasBackend() },
@@ -196,10 +211,13 @@ async function runWithSinglePdf(context: any, action: 'crop' | 'restore'): Promi
 
 /** 文件替换成功后：刷新 Reader + 通知 Sync + 更新附件信息 */
 async function afterFileReplaced(item: Zotero.Item): Promise<void> {
-  // Reader 重读磁盘文件（保留页码/缩放）；私有 API 不可用时提示用户重开
+  // Reader 重读磁盘文件（保留页码/缩放）；私有 API 不可用或部分失败时提示用户
   const reload = await reloadReadersForItem(item.id);
   if (!reload.available) {
     alertError('已裁剪完成，但无法自动刷新打开的阅读器，请重新打开 PDF 查看裁剪结果。');
+  } else if (reload.reloaded < reload.found) {
+    // P1-3：部分 Reader 刷新失败（例如某个 Reader 正忙）也要提示
+    alertError(`已裁剪完成，但 ${reload.found - reload.reloaded} 个打开的阅读器未能自动刷新，请重新打开 PDF 查看裁剪结果。`);
   }
   // 让 Zotero 感知附件文件已变化（sync 由 Zotero 自动检测并上传）
   await notifyAttachmentFileChanged(item);

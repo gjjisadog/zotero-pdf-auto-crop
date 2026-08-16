@@ -2,14 +2,33 @@
  * 文档布局分析：页面分组（尺寸/旋转 + 奇偶自动识别）+ 异常页判定。
  */
 import type { PageAnalysis, DocumentLayout, PageGroup, CropConfig } from './crop-model';
-import { normalizeRotation, displaySize } from './rotation';
-import { boxArea, boxWidth, boxHeight } from './bounding-box';
+import { normalizeRotation, displaySize, boxToSize, pdfBoxToDisplay } from './rotation';
+import { boxArea } from './bounding-box';
 
 function median(values: number[]): number {
   if (values.length === 0) return NaN;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+/** 内容盒 → 显示局部坐标（减去该页 MediaBox 原点并应用旋转）；无内容返回 null */
+function displayLocalBox(a: PageAnalysis): PageBoxLike | null {
+  if (!a.contentBox) return null;
+  const rotation = normalizeRotation(a.rotation);
+  return pdfBoxToDisplay(a.contentBox, a.mediaBox, rotation);
+}
+
+/** 该页的显示尺寸（宽×高，按旋转后） */
+function displaySizeOf(a: PageAnalysis): { width: number; height: number } {
+  return displaySize(boxToSize(a.mediaBox), normalizeRotation(a.rotation));
+}
+
+interface PageBoxLike {
+  left: number;
+  bottom: number;
+  right: number;
+  top: number;
 }
 
 /** 尺寸聚类：与已存在的组中心比较，容差 1 pt */
@@ -37,7 +56,8 @@ function groupBySizeAndRotation(
   const sizeGroups: { width: number; height: number }[] = [];
   const map = new Map<string, number[]>();
   for (const a of analyses) {
-    const si = findSizeGroup(sizeGroups, boxWidth(a.mediaBox), boxHeight(a.mediaBox));
+    const s = boxToSize(a.mediaBox);
+    const si = findSizeGroup(sizeGroups, s.width, s.height);
     const rotation = normalizeRotation(a.rotation);
     const key = `${si}:${rotation}`;
     const arr = map.get(key);
@@ -50,6 +70,8 @@ function groupBySizeAndRotation(
 /**
  * 奇偶自动识别：若组内奇数页与偶数页的「左侧内容边中位数」差异
  * 超过页宽的一定比例（书籍镜像页边距），则拆分为 odd/even 两组。
+ * 内容边一律使用 display-local 坐标（H2-2）：每页减去自己的 MediaBox 原点，
+ * 相同视觉布局、不同 MediaBox 原点的页面不会被误判。
  */
 function splitOddEvenIfMirrored(
   analyses: PageAnalysis[],
@@ -64,13 +86,14 @@ function splitOddEvenIfMirrored(
   for (const idx of indexes) {
     const a = analyses[idx];
     if (!a.contentBox || a.isBlank || a.isOutlier) continue;
-    const w = boxWidth(a.mediaBox);
+    const local = displayLocalBox(a)!;
+    const w = displaySizeOf(a).width;
     if (idx % 2 === 0) {
       even.push(idx);
-      evenLefts.push(a.contentBox.left / w);
+      evenLefts.push(local.left / w);
     } else {
       odd.push(idx);
-      oddLefts.push(a.contentBox.left / w);
+      oddLefts.push(local.left / w);
     }
   }
   if (oddLefts.length < 3 || evenLefts.length < 3) return null;
@@ -83,9 +106,12 @@ function splitOddEvenIfMirrored(
  * 异常页判定（在组内统计完成后调用）：
  * 内容盒任一边偏离组中位数超过 max(比例×页面尺寸, 最小 pt) 即视为异常。
  * 空白页、分析失败页也标记。
+ *
+ * 全部统计使用 display-local 坐标（H2-2）：布局算法不接触绝对 PDF 坐标，
+ * 与稳定化阶段的坐标系统一，同尺寸不同 MediaBox 原点的页面不会误判。
  */
 export function markOutliers(analyses: PageAnalysis[], config: CropConfig): void {
-  // 先按 (尺寸,旋转) 统计各「内容非空页」的中位数盒
+  // 先按 (尺寸,旋转) 统计各「内容非空页」的中位数盒（display-local）
   const groups = groupBySizeAndRotation(analyses);
   for (const indexes of groups.values()) {
     const withContent = indexes.filter((i) => {
@@ -93,20 +119,19 @@ export function markOutliers(analyses: PageAnalysis[], config: CropConfig): void
       return a.contentBox && !a.isBlank && !a.darkBackground && !a.analysisFailed;
     });
     if (withContent.length === 0) continue;
-    const lefts = withContent.map((i) => analyses[i].contentBox!.left);
-    const bottoms = withContent.map((i) => analyses[i].contentBox!.bottom);
-    const rights = withContent.map((i) => analyses[i].contentBox!.right);
-    const tops = withContent.map((i) => analyses[i].contentBox!.top);
+    const localBoxes = withContent.map((i) => displayLocalBox(analyses[i])!);
+    const lefts = localBoxes.map((b) => b.left);
+    const bottoms = localBoxes.map((b) => b.bottom);
+    const rights = localBoxes.map((b) => b.right);
+    const tops = localBoxes.map((b) => b.top);
     const mL = median(lefts);
     const mB = median(bottoms);
     const mR = median(rights);
     const mT = median(tops);
-    const medArea = median(
-      withContent.map((i) => boxArea(analyses[i].contentBox!))
-    );
-    const ref = analyses[withContent[0]];
-    const w = boxWidth(ref.mediaBox);
-    const h = boxHeight(ref.mediaBox);
+    const medArea = median(localBoxes.map((b) => boxArea(b)));
+    const size = displaySizeOf(analyses[withContent[0]]);
+    const w = size.width;
+    const h = size.height;
     const devX = Math.max(w * config.outlierEdgeDeviationFraction, config.outlierMinEdgeDeviationPt);
     const devY = Math.max(h * config.outlierEdgeDeviationFraction, config.outlierMinEdgeDeviationPt);
 
@@ -117,12 +142,12 @@ export function markOutliers(analyses: PageAnalysis[], config: CropConfig): void
         continue;
       }
       if (a.isBlank) continue;
-      if (!a.contentBox) {
+      const local = displayLocalBox(a);
+      if (!local) {
         a.isOutlier = true;
         continue;
       }
-      const cb = a.contentBox;
-      const area = boxArea(cb);
+      const area = boxArea(local);
       // 面积异常（整页图 / 极简页）
       if (medArea > 0 && (area < medArea * 0.25 || area > medArea * 5)) {
         a.isOutlier = true;
@@ -131,20 +156,20 @@ export function markOutliers(analyses: PageAnalysis[], config: CropConfig): void
       // 内容占满页面（边缘触及 MediaBox 且面积占比高）→ 整页图/封面
       const areaRatio = area / (w * h);
       const touchesEdge =
-        cb.left - a.mediaBox.left < 3 &&
-        cb.bottom - a.mediaBox.bottom < 3 &&
-        a.mediaBox.right - cb.right < 3 &&
-        a.mediaBox.top - cb.top < 3;
+        local.left < 3 &&
+        local.bottom < 3 &&
+        w - local.right < 3 &&
+        h - local.top < 3;
       if (touchesEdge && areaRatio > 0.85) {
         a.isOutlier = true;
         continue;
       }
       // 边缘偏离异常
       if (
-        Math.abs(cb.left - mL) > devX ||
-        Math.abs(cb.bottom - mB) > devY ||
-        Math.abs(cb.right - mR) > devX ||
-        Math.abs(cb.top - mT) > devY
+        Math.abs(local.left - mL) > devX ||
+        Math.abs(local.bottom - mB) > devY ||
+        Math.abs(local.right - mR) > devX ||
+        Math.abs(local.top - mT) > devY
       ) {
         a.isOutlier = true;
       }
@@ -182,8 +207,9 @@ export function analyzeLayout(analyses: PageAnalysis[], config: CropConfig): Doc
 
   for (const indexes of bySizeRotation.values()) {
     const representative = analyses[indexes[0]];
-    const width = boxWidth(representative.mediaBox);
-    const height = boxHeight(representative.mediaBox);
+    const size = boxToSize(representative.mediaBox);
+    const width = size.width;
+    const height = size.height;
     const rotation = normalizeRotation(representative.rotation);
     const display = displaySize({ width, height }, rotation);
 

@@ -13,7 +13,8 @@
     "zotero": {
       "id": "zotero-pdf-auto-crop@zotero.org",
       "strict_min_version": "9.0",
-      "strict_max_version": "9.*"
+      "strict_max_version": "9.*",
+      "update_url": "https://github.com/gjjisadog/zotero-pdf-auto-crop/releases/latest/download/update.json"
     }
   }
 }

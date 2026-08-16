@@ -12,6 +12,13 @@
  * restorePdf:
  *   读取恢复元数据 → 恢复 MediaBox/CropBox 等 → 临时文件 → 校验 → 替换
  *
+ * 数据安全（H1-2 / H1-3，第三轮 review）：
+ * - 生产入口 cropFile / restoreFile 由 PdfFileTransaction 完成
+ *   「stat1 → read → stat2」稳定快照，data 与 targetPath 不再作为两个
+ *   独立参数进入事务核心；
+ * - 替换前再次校验源文件指纹（size + mtime），被其他程序修改则中止；
+ * - crop 与 restore 都做数字签名预检（恢复也不会重写已签名 PDF）。
+ *
  * 本层不依赖 Zotero UI；右键菜单、未来批量/自动裁剪共用同一入口。
  */
 import type { CropConfig, PageAnalysis, PageCrop } from '../crop/crop-model';
@@ -22,36 +29,16 @@ import { analyzeLayout } from '../crop/document-layout';
 import { ANALYSIS_DPI, type PdfDocumentHandle, type PdfOpenOptions, openPdfDocument, contentBoxToMediaBoxCoords } from '../pdf/pdf-reader';
 import { PdfWriter, type PageBoxes } from '../pdf/pdf-writer';
 import { createRestoreMetadata, type RestoreMetadata } from '../pdf/crop-metadata';
-import { SafeReplacer, type FileSystem } from '../utils/temp-file';
+import type { FileSystem, FileStats } from '../utils/temp-file';
+import { PdfFileTransaction } from './file-transaction';
+import { CropError, type CropErrorKind } from './crop-error';
 import { log } from '../utils/logger';
-import { boxesEqual, clampBox } from '../crop/bounding-box';
+import { boxesEqual, clampBox, boxIntersect } from '../crop/bounding-box';
+
+export type { CropErrorKind };
+export { CropError };
 
 export type CropStatus = 'cropped' | 'no-change' | 'restored';
-
-export type CropErrorKind =
-  | 'encrypted'       // 加密 PDF（任务 §30：拒绝）
-  | 'signed'          // 数字签名 PDF（任务 §31：拒绝）
-  | 'damaged'         // 解析失败（任务 §32：保留原文件）
-  | 'no-restore-data' // 恢复时没有元数据
-  | 'restore-mismatch' // 恢复数据页数与文档不符
-  | 'io'              // 文件系统错误
-  | 'source-changed'  // 处理期间源文件被其他程序修改（H1：不覆盖新版本）
-  | 'validation'      // 输出校验失败
-  | 'unsupported'     // 其他不支持的情况
-  | 'unknown';
-
-export class CropError extends Error {
-  readonly kind: CropErrorKind;
-
-  constructor(kind: CropErrorKind, message: string, cause?: unknown) {
-    super(
-      cause instanceof Error ? `${message} [${cause.message}]` : message,
-      cause !== undefined ? { cause } : undefined
-    );
-    this.name = 'CropError';
-    this.kind = kind;
-  }
-}
 
 export interface CropResult {
   status: CropStatus;
@@ -66,7 +53,7 @@ export interface CropResult {
 }
 
 export interface CropRequest {
-  /** 原文件字节 */
+  /** 原文件字节（已由调用方读取；H1-2：显式 data 仅用于测试/批处理注入） */
   data: Uint8Array;
   /** 原文件路径（替换目标；临时文件写入同目录） */
   targetPath: string;
@@ -77,9 +64,43 @@ export interface CropRequest {
   config?: Partial<CropConfig>;
   dpi?: number;
   onProgress?: (stage: 'analyzing' | 'applying' | 'saving' | 'verifying', page: number, total: number) => void;
+  /**
+   * 与 data 对应的源文件指纹（cropFile/restoreFile 稳定快照提供）。
+   * 缺省时本服务在替换前自取一次 stat 作为替换校验基准。
+   */
+  knownSourceStat?: FileStats;
+}
+
+/** cropFile / restoreFile 请求：只给路径，读取与校验由事务层完成（H1-2） */
+export interface CropFileRequest {
+  targetPath: string;
+  fs: FileSystem;
+  pdfOptions: PdfOpenOptions;
+  config?: Partial<CropConfig>;
+  dpi?: number;
+  onProgress?: CropRequest['onProgress'];
 }
 
 export class CropService {
+  /**
+   * 生产入口：路径 → 稳定快照（stat1→read→stat2）→ 裁剪 → 原子替换。
+   * data 与 targetPath 不再分离进入事务核心（H1-2）。
+   */
+  async cropFile(request: CropFileRequest): Promise<CropResult> {
+    const txn = new PdfFileTransaction(request.fs, request.targetPath);
+    const snap = await txn.acquireStableSnapshot();
+    return this.cropPdf({
+      data: snap.data,
+      targetPath: request.targetPath,
+      fs: request.fs,
+      pdfOptions: request.pdfOptions,
+      config: request.config,
+      dpi: request.dpi,
+      onProgress: request.onProgress,
+      knownSourceStat: snap.stat,
+    });
+  }
+
   async cropPdf(request: CropRequest): Promise<CropResult> {
     const config: CropConfig = { ...DEFAULT_CROP_CONFIG, ...request.config };
     const dpi = request.dpi ?? ANALYSIS_DPI;
@@ -87,15 +108,21 @@ export class CropService {
     const data = new Uint8Array(request.data);
     const { targetPath, fs, pdfOptions } = request;
     const progress = request.onProgress ?? (() => {});
-    const replacer = new SafeReplacer(fs);
+    const txn = new PdfFileTransaction(fs, targetPath);
 
     // 0. H1：记录源文件指纹（size + mtime）；替换前必须一致，
     //    否则处理期间（可能数十秒/数百页）被其他程序修改的版本会被旧版覆盖。
-    let beforeStat;
-    try {
-      beforeStat = await fs.stat(targetPath);
-    } catch (e) {
-      throw new CropError('io', '无法读取原 PDF 文件状态。', e);
+    //    显式 data 注入（测试/批处理）时由调用方提供 knownSourceStat，
+    //    否则在本服务内先取一次。
+    let beforeStat: FileStats;
+    if (request.knownSourceStat) {
+      beforeStat = request.knownSourceStat;
+    } else {
+      try {
+        beforeStat = await fs.stat(targetPath);
+      } catch (e) {
+        throw new CropError('io', '无法读取原 PDF 文件状态。', e);
+      }
     }
 
     // 1. 安全检测
@@ -146,7 +173,7 @@ export class CropService {
 
     // 4. 逐页渲染分析。
     // H2-1（上一轮）：重新裁剪必须基于「原始可见区域」分析，而不是当前 CropBox。
-    // H2-3（本轮）：只有「重新裁剪」才需要生成恢复原始 CropBox 的分析副本；
+    // H2-3（上一轮）：只有「重新裁剪」才需要生成恢复原始 CropBox 的分析副本；
     // 首次裁剪时原文件就是 Original View，直接分析原输入（避免大文件双倍内存）。
     let analysisData: Uint8Array = data;
     if (existing) {
@@ -185,13 +212,16 @@ export class CropService {
       }
 
       // 6. 最终裁剪框 + 重算 changed（P1-2）。
-      // H2-2：最终 CropBox 必须 ⊆ 原始可见区域（Original effectiveCrop ∩ MediaBox），
-      // 绝不 reveal 用户原本看不到的内容（裁切线/出血/印刷标记）。
+      // H2-2：最终 CropBox 必须 ⊆ 原始可见区域 = Original effectiveCrop ∩ MediaBox
+      //（CropBox 超出 MediaBox 的不规范 PDF 也绝不 reveal 原来看不到的内容）。
       let changedCount = 0;
       for (const crop of pageCrops) {
         const boxes = writer.getPageBoxes(crop.pageIndex);
         const currentVisible = boxes.crop ?? boxes.media;
-        const baseVisible = restoreMetadata.pages[crop.pageIndex].effectiveCrop ?? boxes.media;
+        const saved = restoreMetadata.pages[crop.pageIndex];
+        const baseVisible = saved.effectiveCrop
+          ? (boxIntersect(saved.effectiveCrop, boxes.media) ?? boxes.media)
+          : boxes.media;
         const finalCrop = clampBox(crop.cropBox, baseVisible);
         const changed = !boxesEqual(finalCrop, currentVisible);
         if (changed && !boxesEqual(finalCrop, crop.cropBox)) {
@@ -231,34 +261,8 @@ export class CropService {
       // 8. 校验输出
       await this.verifyOutput(outBytes, pageCount, pageCrops);
 
-      // 9. 原子替换
-      let tempPath: string;
-      try {
-        tempPath = await replacer.stage(targetPath, outBytes);
-      } catch (e) {
-        throw new CropError('io', '写入临时文件失败，原文件未做任何修改。', e);
-      }
-      // H1：替换前校验源文件未被其他程序修改（Zotero Sync/Dropbox/外部编辑器）
-      try {
-        const nowStat = await fs.stat(targetPath);
-        if (nowStat.size !== beforeStat.size || nowStat.lastModified !== beforeStat.lastModified) {
-          await replacer.cleanup(tempPath);
-          throw new CropError(
-            'source-changed',
-            '处理期间 PDF 已被其他程序修改，为避免覆盖新版本，本次裁剪已取消。原文件未做修改。'
-          );
-        }
-      } catch (e) {
-        if (e instanceof CropError) throw e;
-        await replacer.cleanup(tempPath);
-        throw new CropError('io', '替换前校验源文件失败，原文件未做任何修改。', e);
-      }
-      try {
-        await replacer.replace(tempPath, targetPath);
-      } catch (e) {
-        await replacer.cleanup(tempPath);
-        throw new CropError('io', '替换原文件失败，原文件未做任何修改。', e);
-      }
+      // 9. 原子替换（写临时文件 → 替换前指纹校验 → 单次 move）
+      await txn.atomicReplace(outBytes, beforeStat);
 
       log.info(`Cropped ${changedCount}/${pageCount} pages -> ${targetPath}`);
       return {
@@ -271,10 +275,46 @@ export class CropService {
     }
   }
 
+  /**
+   * 生产入口：路径 → 稳定快照 → 恢复 → 原子替换（H1-3：
+   * restore 与 crop 同等的数据安全保护）。
+   */
+  async restoreFile(request: Omit<CropFileRequest, 'dpi' | 'config'>): Promise<CropResult> {
+    const txn = new PdfFileTransaction(request.fs, request.targetPath);
+    const snap = await txn.acquireStableSnapshot();
+    return this.restorePdf({
+      data: snap.data,
+      targetPath: request.targetPath,
+      fs: request.fs,
+      pdfOptions: request.pdfOptions,
+      onProgress: request.onProgress,
+      knownSourceStat: snap.stat,
+    });
+  }
+
   async restorePdf(request: Omit<CropRequest, 'dpi'>): Promise<CropResult> {
     const data = new Uint8Array(request.data);
     const { targetPath, fs, pdfOptions } = request;
-    const replacer = new SafeReplacer(fs);
+    const txn = new PdfFileTransaction(fs, targetPath);
+
+    let beforeStat: FileStats;
+    if (request.knownSourceStat) {
+      beforeStat = request.knownSourceStat;
+    } else {
+      try {
+        beforeStat = await fs.stat(targetPath);
+      } catch (e) {
+        throw new CropError('io', '无法读取原 PDF 文件状态。', e);
+      }
+    }
+
+    // H1-3：恢复同样拒绝已签名 PDF（重写会使签名失效）
+    if (PdfWriter.scanForDigitalSignature(data)) {
+      throw new CropError(
+        'signed',
+        '此 PDF 包含数字签名，修改 PDF 会使签名失效，因此插件未执行恢复。'
+      );
+    }
 
     let writer: PdfWriter;
     try {
@@ -297,6 +337,9 @@ export class CropService {
       );
     }
 
+    // H2-3：恢复判断同时比较「有效几何」与「直接/继承结构状态」——
+    // 即使当前可见区域数值与原始完全一致，只要结构不同（原本继承、
+    // 现在被插件写成直接 CropBox）也必须恢复结构。
     let changed = 0;
     for (let i = 0; i < pageCount; i++) {
       const current = writer.getPageBoxes(i);
@@ -304,7 +347,10 @@ export class CropService {
       // 比较「当前可见区域」与「原始可见区域」（effectiveCrop 为 null 时等于 MediaBox）
       const curVisible = current.crop ?? current.media;
       const savedVisible = saved.effectiveCrop ?? current.media;
-      if (!boxesEqual(curVisible, savedVisible)) {
+      const directNow = writer.hasDirectCropBox(i);
+      const needsRestore =
+        !boxesEqual(curVisible, savedVisible) || directNow !== saved.hadDirectCrop;
+      if (needsRestore) {
         // H2-1：原本直接声明过 CropBox → 恢复原值；否则删除插件写入的 CropBox，
         // 恢复对父节点 CropBox 的继承
         writer.setPageCrop(i, saved.hadDirectCrop ? saved.effectiveCrop : null);
@@ -318,18 +364,8 @@ export class CropService {
     const outBytes = await writer.save();
     await this.verifyOutput(outBytes, pageCount, null);
 
-    let tempPath: string;
-    try {
-      tempPath = await replacer.stage(targetPath, outBytes);
-    } catch (e) {
-      throw new CropError('io', '写入临时文件失败，原文件未做任何修改。', e);
-    }
-    try {
-      await replacer.replace(tempPath, targetPath);
-    } catch (e) {
-      await replacer.cleanup(tempPath);
-      throw new CropError('io', '替换原文件失败，原文件未做任何修改。', e);
-    }
+    // 原子替换（与 crop 同一事务层：临时文件 → 指纹校验 → 单次 move）
+    await txn.atomicReplace(outBytes, beforeStat);
     log.info(`Restored ${changed}/${pageCount} pages -> ${targetPath}`);
     return { status: 'restored', pageCount, changedPageCount: changed, message: 'PDF 原始页面已恢复' };
   }
@@ -356,8 +392,12 @@ export class CropService {
       const boxes = writer.getPageBoxes(i);
       const rotation = writer.getPageRotation(i);
       const visibleBox = boxes.crop ?? boxes.media;
-      // P1-1：原始可见区域（重新裁剪时来自恢复元数据，首次裁剪时 = 当前）
-      const originalVisibleBox = restoreMetadata.pages[i].effectiveCrop ?? boxes.media;
+      // P1-1：原始可见区域 = 恢复的 effectiveCrop ∩ MediaBox（CropBox 超出
+      // MediaBox 的不规范 PDF 也不 reveal 原来看不到的内容）
+      const saved = restoreMetadata.pages[i];
+      const originalVisibleBox = saved.effectiveCrop
+        ? (boxIntersect(saved.effectiveCrop, boxes.media) ?? boxes.media)
+        : boxes.media;
       let analysis: PageAnalysis;
       try {
         // 非嵌入字体页：渲染可能缺字导致内容盒漏检 → 标记失败（不裁剪，安全优先）

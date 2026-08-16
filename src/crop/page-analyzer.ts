@@ -9,6 +9,16 @@
  *   兼容纸黄/浅灰的扫描件；
  * - 抗噪点：水平/垂直两遍「连续 run」过滤，孤立 1–2 px 噪点不计入；
  * - 宁多留白：任何误判方向都是「内容区域更大 → 裁剪更少」，绝不会切掉正文。
+ *
+ * 扫描黑边/阴影处理（H1-1，第三轮 review）：
+ * - 边缘暗带只在其「高置信度」确定为扫描伪影时才允许从内容中排除；
+ * - 置信度 = 多信号同时成立：整列/整行内容占比高（fillRatio）、带宽窄、
+ *   带内灰度均匀（扫描阴影/黑边近似单色；真实照片/色条纹理复杂）、
+ *   且带内平均灰度明显暗于页面背景（近黑黑边/阴影，排除浅色真实内容）；
+ * - 任一信号不满足 → 该侧不排除 → 真实贴边图片/色条/侧栏绝不被裁掉；
+ * - 结果同时给出 rawContentBox（不做任何暗带排除）与 cleanedContentBox
+ *   （仅排除已确认伪影），contentBox = cleaned（只排除了确认噪声，满足
+ *   「Final CropBox 必须包含所有不能确认是噪声的内容」）。
  */
 
 export interface RenderedPage {
@@ -32,20 +42,37 @@ export interface PixelAnalyzeOptions {
   /** 背景估计使用的边缘带宽度比例，默认 0.03 */
   edgeBandFraction?: number;
   /**
-   * 边缘暗带（扫描阴影/黑边）判定：边缘列/行的「内容像素占比」超过该值
-   * 视为暗带（整列都是偏离背景的像素 = 阴影/黑边/渐变伪影），从内容检测中
-   * 排除；默认 0.6。暗带最大宽度默认 5% 页面尺寸。
+   * 边缘暗带判定：边缘列/行的「内容像素占比」超过该值视为暗带候选
+   * （整列都是偏离背景的像素 = 阴影/黑边/渐变伪影）；默认 0.6。
+   * 暗带最大宽度默认 5% 页面尺寸。
    */
   darkBandRatio?: number;
   darkBandMaxFraction?: number;
+  /**
+   * 暗带置信度（H1-1）：候选暗带内灰度方差低于该值 = 均匀
+   * （扫描阴影/黑边近似单色；照片/色条/图表有纹理）。默认 400（std≈20）。
+   */
+  darkBandGrayVariance?: number;
+  /**
+   * 暗带置信度（H1-1）：带内平均灰度比背景暗超过该值才可能是扫描伪影
+   * （近黑黑边/阴影；浅色真实内容不被误伤）。默认 25。
+   */
+  darkBandDarkness?: number;
 }
 
 export interface PixelAnalyzeResult {
-  /** 显示坐标内容盒（左下原点）；空白页为 null */
+  /**
+   * 实际使用的内容盒（显示坐标，左下原点）：仅排除「高置信度」暗带后的结果；
+   * 空白页为 null。
+   */
   contentBox: { left: number; bottom: number; right: number; top: number } | null;
+  /** 不做任何暗带排除的内容盒（安全基准/测试用）；空白页为 null */
+  rawContentBox: { left: number; bottom: number; right: number; top: number } | null;
+  /** 仅排除高置信度暗带后的内容盒；空白页为 null */
+  cleanedContentBox: { left: number; bottom: number; right: number; top: number } | null;
   /** 背景灰度估计值 */
   backgroundGray: number;
-  /** 内容像素占比 */
+  /** 内容像素占比（含暗带，用于空白页判定） */
   contentFraction: number;
 }
 
@@ -57,6 +84,8 @@ const DEFAULT_OPTS: Required<PixelAnalyzeOptions> = {
   edgeBandFraction: 0.03,
   darkBandRatio: 0.6,
   darkBandMaxFraction: 0.05,
+  darkBandGrayVariance: 400,
+  darkBandDarkness: 25,
 };
 
 export function analyzePagePixels(page: RenderedPage, options: PixelAnalyzeOptions = {}): PixelAnalyzeResult {
@@ -108,8 +137,14 @@ export function analyzePagePixels(page: RenderedPage, options: PixelAnalyzeOptio
     }
   }
 
-  // 4. 边缘暗带检测（扫描阴影/黑边）：整列/整行内容像素占比极高的边缘连续带
-  //    （渐变阴影、黑边、纸张边缘伪影），从内容检测中排除。
+  const contentFraction = contentCount / (w * h);
+  if (contentFraction < opts.blankFraction) {
+    return { contentBox: null, rawContentBox: null, cleanedContentBox: null, backgroundGray, contentFraction };
+  }
+
+  // 4. 边缘暗带候选（扫描阴影/黑边）：整列/整行内容像素占比极高的边缘连续带
+  // 5. 逐边置信度判定（H1-1）：占比 + 窄带 + 均匀 + 明显暗于背景，
+  //    全部满足才视为扫描伪影并从内容中排除；任一不满足 → 该侧保留。
   const maxBand = Math.max(1, Math.round(w * opts.darkBandMaxFraction));
   const colRatio = new Float32Array(w);
   for (let x = 0; x < w; x++) {
@@ -133,29 +168,80 @@ export function analyzePagePixels(page: RenderedPage, options: PixelAnalyzeOptio
   while (skipBottom < maxBand && rowRatio[skipBottom] > ratio) skipBottom++;
   let skipTop = 0;
   while (skipTop < maxBand && rowRatio[h - 1 - skipTop] > ratio) skipTop++;
-  // 暗带像素清零（水平/垂直 run 过滤自然排除）
-  for (let x = 0; x < skipLeft; x++) {
-    for (let y = 0; y < h; y++) isContent[y * w + x] = 0;
-  }
-  for (let x = w - skipRight; x < w; x++) {
-    for (let y = 0; y < h; y++) isContent[y * w + x] = 0;
-  }
-  for (let y = 0; y < skipBottom; y++) {
-    for (let x = 0; x < w; x++) isContent[y * w + x] = 0;
-  }
-  for (let y = h - skipTop; y < h; y++) {
-    for (let x = 0; x < w; x++) isContent[y * w + x] = 0;
-  }
 
-  const contentFraction = contentCount / (w * h);
-  if (contentFraction < opts.blankFraction) {
-    return { contentBox: null, backgroundGray, contentFraction };
-  }
+  // 逐边置信度：带内灰度「均匀」且「明显暗于背景」
+  const bandLooksLikeArtifact = (
+    startX: number,
+    endX: number,
+    startY: number,
+    endY: number
+  ): boolean => {
+    let sum = 0;
+    let sumSq = 0;
+    let n = 0;
+    for (let y = startY; y < endY; y++) {
+      for (let x = startX; x < endX; x++) {
+        const g = gray[y * w + x];
+        sum += g;
+        sumSq += g * g;
+        n++;
+      }
+    }
+    if (n === 0) return false;
+    const mean = sum / n;
+    const variance = sumSq / n - mean * mean;
+    if (variance >= opts.darkBandGrayVariance) return false; // 有纹理 → 真实内容
+    if (mean > backgroundGray - opts.darkBandDarkness) return false; // 不暗 → 浅色真实内容
+    return true;
+  };
 
-  // 4. 水平 run 过滤：每行取「连续内容段 ≥ minRun 且该行内容数 ≥ minCount」的行的 x 范围
+  if (skipLeft > 0 && !bandLooksLikeArtifact(0, skipLeft, 0, h)) skipLeft = 0;
+  if (skipRight > 0 && !bandLooksLikeArtifact(w - skipRight, w, 0, h)) skipRight = 0;
+  if (skipBottom > 0 && !bandLooksLikeArtifact(0, w, 0, skipBottom)) skipBottom = 0;
+  if (skipTop > 0 && !bandLooksLikeArtifact(0, w, h - skipTop, h)) skipTop = 0;
+
+  // 6. 双内容盒：raw（不排除任何暗带）与 cleaned（仅排除已确认伪影）。
+  //    水平/垂直 run 过滤保证孤立噪点不影响 bbox。
+  const rawBox = bboxFromContent(isContent, w, h, opts);
+  if (skipLeft + skipRight + skipBottom + skipTop > 0) {
+    for (let x = 0; x < skipLeft; x++) {
+      for (let y = 0; y < h; y++) isContent[y * w + x] = 0;
+    }
+    for (let x = w - skipRight; x < w; x++) {
+      for (let y = 0; y < h; y++) isContent[y * w + x] = 0;
+    }
+    for (let y = 0; y < skipBottom; y++) {
+      for (let x = 0; x < w; x++) isContent[y * w + x] = 0;
+    }
+    for (let y = h - skipTop; y < h; y++) {
+      for (let x = 0; x < w; x++) isContent[y * w + x] = 0;
+    }
+  }
+  const cleanedBox = bboxFromContent(isContent, w, h, opts);
+
+  return {
+    contentBox: cleanedBox,
+    rawContentBox: rawBox,
+    cleanedContentBox: cleanedBox,
+    backgroundGray,
+    contentFraction,
+  };
+}
+
+/**
+ * 从内容标记计算显示坐标 bbox（画布坐标 y 向下 → 显示坐标 y 向上）。
+ * 水平 run 过滤：每行取「连续内容段 ≥ minRun 且该行内容数 ≥ minCount」；
+ * 垂直同理。返回 null 表示无可信内容。
+ */
+function bboxFromContent(
+  isContent: Uint8Array,
+  w: number,
+  h: number,
+  opts: Required<PixelAnalyzeOptions>
+): { left: number; bottom: number; right: number; top: number } | null {
+  // 水平 run 过滤：每行取「连续内容段 ≥ minRun 且该行内容数 ≥ minCount」的行的 x 范围
   let minX = w;
   let maxX = -1;
-  const rowHasContent = new Uint8Array(h);
   for (let y = 0; y < h; y++) {
     const row = y * w;
     let run = 0;
@@ -176,19 +262,17 @@ export function analyzePagePixels(page: RenderedPage, options: PixelAnalyzeOptio
       }
     }
     if (count >= opts.minCount && rowMin <= rowMax) {
-      rowHasContent[y] = 1;
       if (rowMin < minX) minX = rowMin;
       if (rowMax > maxX) maxX = rowMax;
     }
   }
   if (maxX < 0) {
-    return { contentBox: null, backgroundGray, contentFraction };
+    return null;
   }
 
-  // 5. 垂直 run 过滤：每列取「连续内容段 ≥ minRun 且该列内容数 ≥ minCount」的列的 y 范围
+  // 垂直 run 过滤：每列取「连续内容段 ≥ minRun 且该列内容数 ≥ minCount」的列的 y 范围
   let minY = h;
   let maxY = -1;
-  const colHasContent = new Uint8Array(w);
   for (let x = 0; x < w; x++) {
     let run = 0;
     let count = 0;
@@ -207,25 +291,20 @@ export function analyzePagePixels(page: RenderedPage, options: PixelAnalyzeOptio
       }
     }
     if (count >= opts.minCount && colMin <= colMax) {
-      colHasContent[x] = 1;
       if (colMin < minY) minY = colMin;
       if (colMax > maxY) maxY = colMax;
     }
   }
   if (maxY < 0) {
-    return { contentBox: null, backgroundGray, contentFraction };
+    return null;
   }
 
-  // 6. 画布坐标（y 向下）→ 显示坐标（y 向上，左下原点）
+  // 画布坐标（y 向下）→ 显示坐标（y 向上，左下原点）
   return {
-    contentBox: {
-      left: minX,
-      bottom: h - 1 - maxY,
-      right: maxX,
-      top: h - 1 - minY,
-    },
-    backgroundGray,
-    contentFraction,
+    left: minX,
+    bottom: h - 1 - maxY,
+    right: maxX,
+    top: h - 1 - minY,
   };
 }
 

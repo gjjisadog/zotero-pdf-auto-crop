@@ -1,0 +1,12 @@
+{
+  "addons": {
+    "zotero-pdf-auto-crop@zotero.org": {
+      "updates": [
+        {
+          "version": "0.1.0",
+          "update_link": "https://github.com/gjjisadog/zotero-pdf-auto-crop/releases/download/0.1.0/zotero-pdf-auto-crop-0.1.0.xpi"
+        }
+      ]
+    }
+  }
+}

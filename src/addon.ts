@@ -46,36 +46,59 @@ export class Addon {
     await this.runPrefDrivenSelfTest();
   }
 
-  /** 从主窗口复制缺失的 DOM 构造器到 bootstrap 全局 */
-  private patchMissingDOMGlobals(): void {
+  /**
+   * 从指定窗口（默认当前主窗口）复制 DOM 构造器到 bootstrap 全局。
+   *
+   * H2-4（第三轮 review）：realm 敏感对象（Path2D/DOMMatrix/ImageData 等）
+   * 必须与渲染 canvas 同 realm。macOS 上关闭主窗口后应用进程继续运行、
+   * 重新打开的是新窗口（新 realm）——因此主窗口变化时旧窗口的构造器会
+   * 被新窗口覆盖（onMainWindowLoad 重新调用本方法）。
+   *
+   * 注意：仅覆盖「realm 敏感的 DOM 构造器」；基础字符串/编解码全局
+   * （atob/btoa/TextEncoder 等）只在缺失时补齐——无条件覆盖会破坏
+   * bootstrap 全局的既有绑定（实测：覆盖 atob 后 pdf.js 报
+   * `t.charCodeAt is not a function`）。
+   */
+  private patchMissingDOMGlobals(win?: unknown): void {
     const G = globalThis as any;
-    const win = Zotero.getMainWindow?.();
-    if (!win) return;
-    const names = [
-      // DOM 基础
-      'DOMException', 'AbortController', 'AbortSignal', 'Path2D', 'DOMMatrix',
-      'ImageData', 'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder',
+    const w = (win ?? Zotero.getMainWindow?.()) as any;
+    if (!w) return;
+    // realm 敏感：Path2D/DOMMatrix/ImageData 必须与渲染 canvas 同 realm，
+    // 主窗口变化时无条件刷新
+    const realmSensitive = ['Path2D', 'DOMMatrix', 'ImageData'];
+    // 缺失补齐：DOM 基础与流/网络（pdf.js 图像解码与字体加载需要）
+    const missingOk = [
+      'DOMException', 'AbortController', 'AbortSignal',
+      'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder',
       'atob', 'btoa', 'structuredClone', 'Blob', 'FileReader',
-      // 流 / 网络（pdf.js 图像解码与字体加载需要）
       'ReadableStream', 'WritableStream', 'TransformStream',
       'CompressionStream', 'DecompressionStream',
       'fetch', 'Response', 'Request', 'Headers',
       'MessageChannel', 'MessagePort', 'BroadcastChannel',
       'Event', 'EventTarget', 'CustomEvent', 'crypto', 'performance',
     ];
-    for (const name of names) {
-      if (typeof G[name] === 'undefined' && typeof win[name] !== 'undefined') {
-        try {
-          G[name] = win[name];
-        } catch {
-          // 个别构造器可能不可复制，忽略
-        }
+    for (const name of realmSensitive) {
+      if (typeof w[name] === 'undefined') continue;
+      try {
+        G[name] = w[name];
+      } catch {
+        // 个别构造器可能不可复制，忽略
+      }
+    }
+    for (const name of missingOk) {
+      if (typeof G[name] !== 'undefined' || typeof w[name] === 'undefined') continue;
+      try {
+        G[name] = w[name];
+      } catch {
+        // 个别构造器可能不可复制，忽略
       }
     }
   }
 
-  async onMainWindowLoad(_win: unknown): Promise<void> {
-    // V1 无窗口相关资源（菜单由 Zotero.MenuManager 统一管理）
+  async onMainWindowLoad(win: unknown): Promise<void> {
+    // H2-4：主窗口重建（关闭后重开）时 realm 会变化，
+    // 用新窗口的构造器重新刷新 DOM 全局，避免跨 realm 对象混用
+    this.patchMissingDOMGlobals(win);
   }
 
   async onMainWindowUnload(_win: unknown): Promise<void> {}
@@ -93,19 +116,17 @@ export class Addon {
   }
 
   /**
-   * 程序化裁剪入口（文件路径）：与右键菜单共用同一 CropService。
-   * 亦为 V2「导入后自动裁剪 / 批量裁剪」的预留 API（任务 §42–§43）。
-   * 注意：仅供文件系统可直接访问的附件路径使用，不处理 Zotero item 状态。
+   * 程序化裁剪入口（文件路径）：与右键菜单共用同一 CropService（cropFile：
+   * 稳定快照 + 原子替换）。亦为 V2「导入后自动裁剪 / 批量裁剪」的预留 API
+   * （任务 §42–§43）。注意：仅供文件系统可直接访问的附件路径使用，
+   * 不处理 Zotero item 状态。
    */
   async cropFile(path: string, config?: Partial<CropConfig>): Promise<CropResult> {
     log.info(`cropFile: ${path}`);
-    const fs = new ZoteroFileSystem();
-    const data = await fs.readFile(path);
     const service = new CropService();
-    const r = await service.cropPdf({
-      data,
+    const r = await service.cropFile({
       targetPath: path,
-      fs,
+      fs: new ZoteroFileSystem(),
       pdfOptions: {
         standardFontDataUrl: STANDARD_FONTS_URL,
         canvasBackend: createDefaultCanvasBackend(),
@@ -119,13 +140,10 @@ export class Addon {
   /** 程序化恢复入口（文件路径） */
   async restoreFile(path: string): Promise<CropResult> {
     log.info(`restoreFile: ${path}`);
-    const fs = new ZoteroFileSystem();
-    const data = await fs.readFile(path);
     const service = new CropService();
-    const r = await service.restorePdf({
-      data,
+    const r = await service.restoreFile({
       targetPath: path,
-      fs,
+      fs: new ZoteroFileSystem(),
       pdfOptions: {
         standardFontDataUrl: STANDARD_FONTS_URL,
         canvasBackend: createDefaultCanvasBackend(),
