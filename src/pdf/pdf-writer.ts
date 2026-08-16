@@ -21,7 +21,8 @@ import {
 
 export interface PageBoxes {
   media: PageBox;
-  crop: PageBox;
+  /** 当前 CropBox；null = 页面原本没有 CropBox（显示即 MediaBox） */
+  crop: PageBox | null;
   trim?: PageBox;
   bleed?: PageBox;
   art?: PageBox;
@@ -91,6 +92,12 @@ export class PdfWriter {
     return undefined;
   }
 
+  /** 页面是否显式设置了 CropBox（含继承） */
+  hasCropBox(index: number): boolean {
+    const node = this.getPageNode(index);
+    return node.get(PDFName.of('CropBox')) instanceof PDFArray;
+  }
+
   getPageBoxes(index: number): PageBoxes {
     const page = this.doc.getPage(index);
     const media = boxFromRect(
@@ -99,9 +106,13 @@ export class PdfWriter {
       page.getMediaBox().width,
       page.getMediaBox().height
     );
-    const cropRect = page.getCropBox(); // fallback MediaBox
-    const crop = boxFromRect(cropRect.x, cropRect.y, cropRect.width, cropRect.height);
     const node = this.getPageNode(index);
+    const crop = this.hasCropBox(index)
+      ? (() => {
+          const r = page.getCropBox();
+          return boxFromRect(r.x, r.y, r.width, r.height);
+        })()
+      : null;
     return {
       media,
       crop,
@@ -112,42 +123,25 @@ export class PdfWriter {
   }
 
   /**
-   * 写入裁剪框：CropBox 必须 ⊆ MediaBox（调用方已保证）。
-   * 已存在的 TrimBox/BleedBox/ArtBox 同步为新值（保持打印/预览一致）。
+   * 写入裁剪框（P1-1：只写 CropBox，不碰 MediaBox/TrimBox/BleedBox/ArtBox——
+   * 后者是印刷语义，阅读插件无理由修改）。
+   * crop 为 null 表示删除 CropBox（恢复"原本无 CropBox"的状态）。
+   * CropBox 必须 ⊆ MediaBox（调用方已保证）。
    */
-  setPageCrop(index: number, crop: PageBox): void {
+  setPageCrop(index: number, crop: PageBox | null): void {
+    const node = this.getPageNode(index);
+    if (crop === null) {
+      node.delete(PDFName.of('CropBox'));
+      return;
+    }
     const page = this.doc.getPage(index);
     const r = boxToRect(crop);
     page.setCropBox(r.x, r.y, r.width, r.height);
-    const node = this.getPageNode(index);
-    if (node.get(PDFName.of('TrimBox')) instanceof PDFArray) {
-      page.setTrimBox(r.x, r.y, r.width, r.height);
-    }
-    if (node.get(PDFName.of('BleedBox')) instanceof PDFArray) {
-      page.setBleedBox(r.x, r.y, r.width, r.height);
-    }
-    if (node.get(PDFName.of('ArtBox')) instanceof PDFArray) {
-      page.setArtBox(r.x, r.y, r.width, r.height);
-    }
   }
 
-  /** 恢复原始盒（MediaBox 与 CropBox 等） */
-  restorePageBoxes(index: number, boxes: PageBoxes): void {
-    const page = this.doc.getPage(index);
-    const m = boxToRect(boxes.media);
-    page.setMediaBox(m.x, m.y, m.width, m.height);
-    const c = boxToRect(boxes.crop);
-    page.setCropBox(c.x, c.y, c.width, c.height);
-    const node = this.getPageNode(index);
-    for (const name of ['TrimBox', 'BleedBox', 'ArtBox']) {
-      const b = name === 'TrimBox' ? boxes.trim : name === 'BleedBox' ? boxes.bleed : boxes.art;
-      if (node.get(PDFName.of(name)) instanceof PDFArray && b) {
-        const r = boxToRect(b);
-        if (name === 'TrimBox') page.setTrimBox(r.x, r.y, r.width, r.height);
-        else if (name === 'BleedBox') page.setBleedBox(r.x, r.y, r.width, r.height);
-        else page.setArtBox(r.x, r.y, r.width, r.height);
-      }
-    }
+  /** 恢复原始可见状态（P1-1：只恢复 CropBox；其他盒从未被修改） */
+  restorePageBoxes(index: number, saved: { crop: PageBox | null }): void {
+    this.setPageCrop(index, saved.crop);
   }
 
   /** 读取恢复元数据（Info 键优先，XMP 兜底）；无则 null */

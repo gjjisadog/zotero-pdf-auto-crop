@@ -24,7 +24,7 @@ import { PdfWriter, type PageBoxes } from '../pdf/pdf-writer';
 import { createRestoreMetadata, type RestoreMetadata } from '../pdf/crop-metadata';
 import { SafeReplacer, type FileSystem } from '../utils/temp-file';
 import { log } from '../utils/logger';
-import { boxesEqual } from '../crop/bounding-box';
+import { boxesEqual, clampBox } from '../crop/bounding-box';
 
 export type CropStatus = 'cropped' | 'no-change' | 'restored';
 
@@ -126,11 +126,21 @@ export class CropService {
     } else {
       const boxes: PageBoxes[] = [];
       for (let i = 0; i < pageCount; i++) boxes.push(writer.getPageBoxes(i));
-      restoreMetadata = createRestoreMetadata(boxes);
+      restoreMetadata = createRestoreMetadata(boxes.map((b) => ({ crop: b.crop })));
     }
 
-    // 4. 逐页渲染分析
-    const pdfHandle = await this.openPdf(data, pdfOptions);
+    // 4. 逐页渲染分析。
+    // H2-1：二次裁剪必须基于「原始可见区域」分析，而不是当前（已被裁剪的）CropBox。
+    // 有恢复元数据时，先在内存中把 CropBox 恢复为原始值，再用该副本做渲染分析。
+    let analysisData: Uint8Array = data;
+    if (restoreMetadata) {
+      const analysisWriter = await PdfWriter.open(data);
+      for (let i = 0; i < pageCount; i++) {
+        analysisWriter.setPageCrop(i, restoreMetadata.pages[i].crop);
+      }
+      analysisData = await analysisWriter.save();
+    }
+    const pdfHandle = await this.openPdf(analysisData, pdfOptions);
     try {
       const analyses = await this.analyzeAllPages(pdfHandle, writer, pageCount, dpi, progress, config);
 
@@ -150,12 +160,20 @@ export class CropService {
         };
       }
 
-      // 6. 应用裁剪框 + 写入恢复元数据（首次）
+      // 6. 应用裁剪框 + 写入恢复元数据（首次）。
+      // H2-2：最终 CropBox 必须 ⊆ 原始可见区域（Original CropBox ∩ MediaBox），
+      // 绝不 reveal 用户原本看不到的内容（裁切线/出血/印刷标记）。
       for (const crop of pageCrops) {
-        if (crop.changed) {
-          writer.setPageCrop(crop.pageIndex, crop.cropBox);
-          progress('applying', crop.pageIndex + 1, pageCount);
+        if (!crop.changed) continue;
+        const boxes = writer.getPageBoxes(crop.pageIndex);
+        const baseVisible = restoreMetadata.pages[crop.pageIndex].crop ?? boxes.media;
+        const finalCrop = clampBox(crop.cropBox, baseVisible);
+        if (!boxesEqual(finalCrop, crop.cropBox)) {
+          log.debug(`page ${crop.pageIndex + 1}: crop clamped to original visible box`);
         }
+        crop.cropBox = finalCrop;
+        writer.setPageCrop(crop.pageIndex, finalCrop);
+        progress('applying', crop.pageIndex + 1, pageCount);
       }
       writer.setRestoreMetadata(restoreMetadata);
 
@@ -228,17 +246,11 @@ export class CropService {
     for (let i = 0; i < pageCount; i++) {
       const current = writer.getPageBoxes(i);
       const saved = metadata.pages[i];
-      if (
-        !boxesEqual(current.media, saved.media) ||
-        !boxesEqual(current.crop, saved.crop)
-      ) {
-        writer.restorePageBoxes(i, {
-          media: saved.media,
-          crop: saved.crop,
-          trim: saved.trim,
-          bleed: saved.bleed,
-          art: saved.art,
-        });
+      // 比较「当前可见区域」与「原始可见区域」（crop 为 null 时等于 MediaBox）
+      const curVisible = current.crop ?? current.media;
+      const savedVisible = saved.crop ?? current.media;
+      if (!boxesEqual(curVisible, savedVisible)) {
+        writer.restorePageBoxes(i, { crop: saved.crop });
         changed++;
       }
     }
@@ -285,6 +297,7 @@ export class CropService {
       progress('analyzing', i + 1, pageCount);
       const boxes = writer.getPageBoxes(i);
       const rotation = writer.getPageRotation(i);
+      const visibleBox = boxes.crop ?? boxes.media;
       let analysis: PageAnalysis;
       try {
         // 非嵌入字体页：渲染可能缺字导致内容盒漏检 → 标记失败（不裁剪，安全优先）
@@ -293,7 +306,7 @@ export class CropService {
           analysis = {
             pageIndex: i,
             mediaBox: boxes.media,
-            cropBox: boxes.crop,
+            cropBox: visibleBox,
             contentBox: null,
             rotation,
             isBlank: false,
@@ -310,7 +323,7 @@ export class CropService {
             analysis = {
               pageIndex: i,
               mediaBox: boxes.media,
-              cropBox: boxes.crop,
+              cropBox: visibleBox,
               contentBox: null,
               rotation,
               isBlank: false,
@@ -339,7 +352,7 @@ export class CropService {
           analysis = {
             pageIndex: i,
             mediaBox: boxes.media,
-            cropBox: boxes.crop,
+            cropBox: visibleBox,
             contentBox,
             rotation,
             isBlank: px.contentBox === null,
@@ -353,7 +366,7 @@ export class CropService {
         analysis = {
           pageIndex: i,
           mediaBox: boxes.media,
-          cropBox: boxes.crop,
+          cropBox: visibleBox,
           contentBox: null,
           rotation,
           isBlank: false,
@@ -381,7 +394,8 @@ export class CropService {
       if (pageCrops) {
         for (const crop of pageCrops) {
           if (!crop.changed) continue;
-          const actual = writer.getPageBoxes(crop.pageIndex).crop;
+          const actualBoxes = writer.getPageBoxes(crop.pageIndex);
+          const actual = actualBoxes.crop ?? actualBoxes.media;
           if (!boxesEqual(actual, crop.cropBox)) {
             throw new Error(
               `page ${crop.pageIndex + 1} crop box mismatch: ${JSON.stringify(actual)}`

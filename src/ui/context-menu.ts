@@ -196,9 +196,12 @@ async function runWithSinglePdf(context: any, action: 'crop' | 'restore'): Promi
 
 /** 文件替换成功后：刷新 Reader + 通知 Sync + 更新附件信息 */
 async function afterFileReplaced(item: Zotero.Item): Promise<void> {
-  // Reader 重读磁盘文件（保留页码/缩放）
-  await reloadReadersForItem(item.id);
-  // 让 Zotero 感知附件文件已变化（下次 sync 自动上传新版本）
+  // Reader 重读磁盘文件（保留页码/缩放）；私有 API 不可用时提示用户重开
+  const reload = await reloadReadersForItem(item.id);
+  if (!reload.available) {
+    alertError('已裁剪完成，但无法自动刷新打开的阅读器，请重新打开 PDF 查看裁剪结果。');
+  }
+  // 让 Zotero 感知附件文件已变化（sync 由 Zotero 自动检测并上传）
   await notifyAttachmentFileChanged(item);
   // 附件信息缓存刷新（完整索引/修改时间由 Zotero 自身检测）
   try {

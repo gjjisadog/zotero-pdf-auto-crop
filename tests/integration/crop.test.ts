@@ -98,10 +98,11 @@ describe('integration: crop pipeline', () => {
     }
   });
 
-  it('01-normal-paper: 多次裁剪始终基于原始盒（二次裁剪结果一致）', async () => {
+  it('01-normal-paper: 多次裁剪始终基于原始盒（H2-1：幂等 + 篡改后仍恢复正确）', async () => {
     const c = await ctx();
     const path = await copyFixture(c, '01-normal-paper.pdf');
     const first = await runCrop(c, path);
+    expect(first.status).toBe('cropped');
     const afterFirst = await PDFDocument.load(await c.fs.readFile(path), { updateMetadata: false });
     const firstCrops = [];
     for (let i = 0; i < afterFirst.getPageCount(); i++) {
@@ -109,24 +110,43 @@ describe('integration: crop pipeline', () => {
       firstCrops.push({ x: b.x, y: b.y, width: b.width, height: b.height });
     }
 
+    // 第二次裁剪：H2-1 修复后基于「原始可见区域」分析，结果与第一次一致 → 幂等
     const second = await runCrop(c, path);
-    expect(second.status).toBe('cropped');
+    expect(['cropped', 'no-change']).toContain(second.status);
     const afterSecond = await PDFDocument.load(await c.fs.readFile(path), { updateMetadata: false });
     for (let i = 0; i < afterSecond.getPageCount(); i++) {
       const b = afterSecond.getPage(i).getCropBox();
-      // 像素分析存在 <1px 量化波动（100dpi 下 1px≈0.72pt），允许 1.5pt
       expect(Math.abs(b.x - firstCrops[i].x)).toBeLessThan(1.5);
       expect(Math.abs(b.y - firstCrops[i].y)).toBeLessThan(1.5);
       expect(Math.abs(b.width - firstCrops[i].width)).toBeLessThan(1.5);
       expect(Math.abs(b.height - firstCrops[i].height)).toBeLessThan(1.5);
     }
-    // 核心语义：二次裁剪不覆盖原始盒（恢复元数据始终指向最初的 MediaBox/CropBox）
+
+    // 核心语义：多次裁剪不覆盖原始盒（恢复元数据始终指向最初状态）
     const info = (afterSecond as any).context.lookup((afterSecond as any).context.trailerInfo.Info);
     const restore = JSON.parse(info.get(PDFName.of('ZoteroPdfAutoCropRestore')).decodeText());
-    expect(restore.pages[0].crop.left).toBe(0);
-    expect(restore.pages[0].crop.bottom).toBe(0);
-    expect(restore.pages[0].crop.right).toBe(612);
-    expect(restore.pages[0].crop.top).toBe(792);
+    // fixture 01 原本没有 CropBox（显示即 MediaBox）→ 恢复元数据应为 null（P1-1 精确语义）
+    expect(restore.pages[0].crop).toBeNull();
+
+    // 强验证：手动把 CropBox 篡改成错误值后再次裁剪，必须仍能恢复正确裁剪
+    // （证明分析基于原始盒，而不是当前被篡改的 CropBox）
+    const { writeFile } = await import('node:fs/promises');
+    const tampered = await PDFDocument.load(await c.fs.readFile(path), { updateMetadata: false });
+    for (let i = 0; i < tampered.getPageCount(); i++) {
+      tampered.getPage(i).setCropBox(300, 300, 50, 50); // 严重错误裁剪
+    }
+    await writeFile(path, await tampered.save());
+
+    const third = await runCrop(c, path);
+    expect(third.status).toBe('cropped');
+    const afterThird = await PDFDocument.load(await c.fs.readFile(path), { updateMetadata: false });
+    for (let i = 0; i < afterThird.getPageCount(); i++) {
+      const b = afterThird.getPage(i).getCropBox();
+      expect(Math.abs(b.x - firstCrops[i].x)).toBeLessThan(1.5);
+      expect(Math.abs(b.y - firstCrops[i].y)).toBeLessThan(1.5);
+      expect(Math.abs(b.width - firstCrops[i].width)).toBeLessThan(1.5);
+      expect(Math.abs(b.height - firstCrops[i].height)).toBeLessThan(1.5);
+    }
   });
 
   it('02-two-column: 双栏论文可裁剪且内容不切', async () => {
@@ -252,27 +272,26 @@ describe('integration: crop pipeline', () => {
     expect(b.height).toBeGreaterThan(650);
   });
 
-  it('10-annotated: 内嵌批注/书签/链接在裁剪与恢复后保留', async () => {
+  it('10-annotated: 内嵌批注/书签/链接在裁剪与恢复后保留，且 Rect 坐标不变（P1-2）', async () => {
     const c = await ctx();
     const path = await copyFixture(c, '10-annotated.pdf');
     const before = await PDFDocument.load(await c.fs.readFile(path), { updateMetadata: false });
-    const annotsBefore = countAnnots(before);
+    const annotsBefore = annotRects(before);
     const outlinesBefore = countOutlines(before);
+    expect(annotsBefore.length).toBeGreaterThan(0);
 
     await runCrop(c, path);
     const cropped = await PDFDocument.load(await c.fs.readFile(path), { updateMetadata: false });
-    expect(countAnnots(cropped)).toBe(annotsBefore);
+    expect(annotRects(cropped)).toEqual(annotsBefore); // 数量与坐标都一致
     expect(countOutlines(cropped)).toBe(outlinesBefore);
-    // 批注矩形坐标不变（内容坐标未被修改）
-    expect(annotsBefore).toBeGreaterThan(0);
 
     await runRestore(c, path);
     const restored = await PDFDocument.load(await c.fs.readFile(path), { updateMetadata: false });
-    expect(countAnnots(restored)).toBe(annotsBefore);
+    expect(annotRects(restored)).toEqual(annotsBefore);
     expect(countOutlines(restored)).toBe(outlinesBefore);
-    const b = restored.getPage(0).getCropBox();
-    expect(b.width).toBe(612);
-    expect(b.height).toBe(792);
+    // 恢复后无 CropBox（fixture 原本没有）→ 显示即 MediaBox
+    const node = (restored.getPage(0) as any).node;
+    expect(node.get(PDFName.of('CropBox'))).toBeUndefined();
   });
 
   it('恢复元数据写入 PDF 内部（无第二附件）', async () => {
@@ -293,14 +312,24 @@ async function extractText(handle: Awaited<ReturnType<typeof openPdf>>, pageNumb
   return content.items.map((i: any) => i.str).join(' ');
 }
 
-function countAnnots(doc: PDFDocument): number {
-  let total = 0;
+/** 收集所有页面批注的 Rect（用于裁剪/恢复前后的一致性比较） */
+function annotRects(doc: PDFDocument): { page: number; rect: { x: number; y: number; width: number; height: number } }[] {
+  const out: { page: number; rect: { x: number; y: number; width: number; height: number } }[] = [];
   for (let i = 0; i < doc.getPageCount(); i++) {
     const node = (doc.getPage(i) as any).node;
     const annots = node.get(PDFName.of('Annots'));
-    if (annots instanceof PDFArray) total += annots.size();
+    if (!(annots instanceof PDFArray)) continue;
+    for (let j = 0; j < annots.size(); j++) {
+      const ref = annots.get(j);
+      const dict = doc.context.lookup(ref) as any;
+      if (!dict || typeof dict.get !== 'function') continue;
+      const rect = dict.get(PDFName.of('Rect'));
+      if (rect instanceof PDFArray) {
+        out.push({ page: i, rect: rect.asRectangle() });
+      }
+    }
   }
-  return total;
+  return out;
 }
 
 function countOutlines(doc: PDFDocument): number {
@@ -311,3 +340,42 @@ function countOutlines(doc: PDFDocument): number {
 void readFixture;
 void boxFromRect;
 void DEFAULT_CROP_CONFIG;
+
+describe('integration: P1-1 only CropBox is modified', () => {
+  it('带 TrimBox/BleedBox 的 PDF：裁剪只写 CropBox，其他盒原样', async () => {
+    const { PDFDocument, PDFName, StandardFonts, rgb } = await import('pdf-lib');
+    const { writeFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const c = await ctx();
+    const path = join(c.dir, 'with-trim.pdf');
+
+    // 构造：MediaBox [0 0 612 792]，CropBox [20 20 592 772]（出版商预裁剪），TrimBox/BleedBox 同 CropBox
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const page = doc.addPage([612, 792]);
+    page.setCropBox(20, 20, 572, 752);
+    page.setTrimBox(20, 20, 572, 752);
+    page.setBleedBox(20, 20, 572, 752);
+    page.drawText('Body text with publisher crop marks', { x: 100, y: 500, size: 14, font, color: rgb(0, 0, 0) });
+    await writeFile(path, await doc.save());
+
+    const result = await runCrop(c, path);
+    expect(result.status).toBe('cropped');
+
+    const out = await PDFDocument.load(await c.fs.readFile(path), { updateMetadata: false });
+    const node = (out.getPage(0) as any).node;
+    const crop = node.get(PDFName.of('CropBox'));
+    const trim = node.get(PDFName.of('TrimBox'));
+    const bleed = node.get(PDFName.of('BleedBox'));
+    // CropBox 被裁剪（变小）
+    const cropRect = crop.asRectangle();
+    expect(cropRect.width).toBeLessThan(572);
+    // TrimBox/BleedBox 原样保留（P1-1：不碰印刷语义盒）
+    const trimRect = trim.asRectangle();
+    expect(trimRect.x).toBe(20);
+    expect(trimRect.width).toBe(572);
+    const bleedRect = bleed.asRectangle();
+    expect(bleedRect.x).toBe(20);
+    expect(bleedRect.width).toBe(572);
+  });
+});

@@ -18,26 +18,21 @@ export const RESTORE_XMP_NS = 'https://github.com/gjjisadog/zotero-pdf-auto-crop
 const RESTORE_XMP_TAG = 'zpac:originalBoxes';
 
 export interface RestoreMetadata {
-  version: 1;
+  /** 2：仅保存每页原始 CropBox（crop 可为 null = 原本无 CropBox；P1-1 只写 CropBox） */
+  version: 2;
   plugin: 'zotero-pdf-auto-crop';
   createdAt: string;
-  pages: {
-    media: PageBox;
-    crop: PageBox;
-    trim?: PageBox;
-    bleed?: PageBox;
-    art?: PageBox;
-  }[];
+  pages: { crop: PageBox | null }[];
 }
 
 export function createRestoreMetadata(
-  pageBoxes: { media: PageBox; crop: PageBox; trim?: PageBox; bleed?: PageBox; art?: PageBox }[]
+  pages: { crop: PageBox | null }[]
 ): RestoreMetadata {
   return {
-    version: 1,
+    version: 2,
     plugin: 'zotero-pdf-auto-crop',
     createdAt: new Date().toISOString(),
-    pages: pageBoxes,
+    pages,
   };
 }
 
@@ -146,7 +141,7 @@ export function writeRestoreMetadata(doc: PDFDocument, metadata: RestoreMetadata
 function validateRestoreMetadata(value: unknown): RestoreMetadata | null {
   if (!value || typeof value !== 'object') return null;
   const v = value as any;
-  if (v.version !== 1 || v.plugin !== 'zotero-pdf-auto-crop' || !Array.isArray(v.pages)) {
+  if (v.plugin !== 'zotero-pdf-auto-crop' || !Array.isArray(v.pages)) {
     return null;
   }
   const isValidBox = (b: any) =>
@@ -154,10 +149,14 @@ function validateRestoreMetadata(value: unknown): RestoreMetadata | null {
     typeof b.left === 'number' && typeof b.bottom === 'number' &&
     typeof b.right === 'number' && typeof b.top === 'number';
   for (const p of v.pages) {
-    if (!isValidBox(p.media) || !isValidBox(p.crop)) return null;
-    if (p.trim !== undefined && !isValidBox(p.trim)) return null;
-    if (p.bleed !== undefined && !isValidBox(p.bleed)) return null;
-    if (p.art !== undefined && !isValidBox(p.art)) return null;
+    if (p.crop !== null && !isValidBox(p.crop)) return null;
   }
-  return v as RestoreMetadata;
+  // 接受 version 1（旧格式含 media/trim 等，仅用其 crop 字段）与 version 2
+  const normalized: RestoreMetadata = {
+    version: 2,
+    plugin: 'zotero-pdf-auto-crop',
+    createdAt: typeof v.createdAt === 'string' ? v.createdAt : new Date().toISOString(),
+    pages: v.pages.map((p: any) => ({ crop: p.crop ?? null })),
+  };
+  return normalized;
 }
