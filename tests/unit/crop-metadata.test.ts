@@ -17,9 +17,9 @@ describe('crop-metadata', () => {
   it('Info 字典编码/解码往返', async () => {
     const doc = await makeDoc();
     const meta = createRestoreMetadata([
-      { crop: boxFromRect(0, 0, 612, 792) },
-      { crop: boxFromRect(50, 50, 500, 700) },
-      { crop: null },
+      { effectiveCrop: boxFromRect(0, 0, 612, 792), hadDirectCrop: true },
+      { effectiveCrop: boxFromRect(50, 50, 500, 700), hadDirectCrop: true },
+      { effectiveCrop: null, hadDirectCrop: false },
     ]);
     writeRestoreMetadata(doc, meta);
 
@@ -28,17 +28,19 @@ describe('crop-metadata', () => {
     const reloaded = await PDFDocument.load(bytes, { updateMetadata: false });
     const got = readRestoreMetadata(reloaded);
     expect(got).not.toBeNull();
-    expect(got!.version).toBe(2);
+    expect(got!.version).toBe(3);
     expect(got!.plugin).toBe('zotero-pdf-auto-crop');
     expect(got!.pages.length).toBe(3);
-    expect(got!.pages[1].crop!.left).toBe(50);
-    expect(got!.pages[1].crop!.top).toBe(750);
-    expect(got!.pages[2].crop).toBeNull();
+    expect(got!.pages[1].effectiveCrop!.left).toBe(50);
+    expect(got!.pages[1].effectiveCrop!.top).toBe(750);
+    expect(got!.pages[1].hadDirectCrop).toBe(true);
+    expect(got!.pages[2].effectiveCrop).toBeNull();
+    expect(got!.pages[2].hadDirectCrop).toBe(false);
   });
 
   it('XMP 命名空间写入（无现有 /Metadata 时）', async () => {
     const doc = await makeDoc();
-    const meta = createRestoreMetadata([{ crop: boxFromRect(0, 0, 612, 792) }]);
+    const meta = createRestoreMetadata([{ effectiveCrop: boxFromRect(0, 0, 612, 792), hadDirectCrop: true }]);
     writeRestoreMetadata(doc, meta);
 
     const metadataRef = doc.catalog.get(PDFName.of('Metadata'));
@@ -59,7 +61,7 @@ describe('crop-metadata', () => {
     );
     doc.catalog.set(PDFName.of('Metadata'), doc.context.register(existing));
 
-    const meta = createRestoreMetadata([{ crop: boxFromRect(0, 0, 612, 792) }]);
+    const meta = createRestoreMetadata([{ effectiveCrop: boxFromRect(0, 0, 612, 792), hadDirectCrop: true }]);
     writeRestoreMetadata(doc, meta);
 
     // 保存后：现有 XMP 未被替换（仍含 dc:title），Info 键可读

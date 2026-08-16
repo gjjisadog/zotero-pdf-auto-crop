@@ -324,4 +324,42 @@ function makeScannedPageImage(wPt, hPt, seed = 1) {
   await writeFile(join(OUT, '12-negative-origin-rotated.pdf'), await doc.save());
 }
 
+// ---------- 13 继承 CropBox（父 Pages 节点设置，页面自身没有） ----------
+{
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  // 根 Pages 设置 CropBox（沿 Page Tree 继承）
+  const pages = doc.catalog.Pages();
+  pages.set(PDFName.of('CropBox'), doc.context.obj([20, 20, 592, 772]));
+  for (let p = 0; p < 2; p++) {
+    const page = doc.addPage([612, 792]);
+    page.drawText('Inherited cropbox page title', { x: 100, y: 700, size: 16, font, color: INK });
+    for (let i = 0; i < 18; i++) {
+      page.drawText(`Line ${i + 1}: lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt.`,
+        { x: 100, y: 660 - i * 14, size: 10, font, color: INK, maxWidth: 450 });
+    }
+  }
+  await writeFile(join(OUT, '13-inherited-cropbox.pdf'), await doc.save());
+}
+
+// ---------- 14 同尺寸不同 MediaBox 原点（正文视觉位置相同） ----------
+{
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const draw = (page, ox, oy) => {
+    page.drawText('Mixed origin page title', { x: ox + 80, y: oy + 690, size: 16, font, color: INK });
+    for (let i = 0; i < 18; i++) {
+      page.drawText(`Line ${i + 1}: lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt.`,
+        { x: ox + 80, y: oy + 650 - i * 14, size: 10, font, color: INK, maxWidth: 452 });
+    }
+  };
+  const p1 = doc.addPage([612, 792]);
+  p1.setMediaBox(20, 30, 612, 792);
+  draw(p1, 20, 30);
+  const p2 = doc.addPage([612, 792]);
+  p2.setMediaBox(-20, -30, 612, 792);
+  draw(p2, -20, -30);
+  await writeFile(join(OUT, '14-mixed-mediabox-origin-same-size.pdf'), await doc.save());
+}
+
 console.log('fixtures generated in', OUT);

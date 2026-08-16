@@ -10,6 +10,7 @@ function paperPage(
   index: number,
   opts: {
     content?: { left: number; bottom: number; right: number; top: number } | null;
+    originalVisible?: { left: number; bottom: number; right: number; top: number };
     rotation?: number;
     outlier?: boolean;
     blank?: boolean;
@@ -26,6 +27,7 @@ function paperPage(
     rotation: opts.rotation ?? 0,
     isBlank: !!opts.blank,
     darkBackground: false,
+    originalVisibleBox: opts.originalVisible ?? media,
     isOutlier: !!opts.outlier,
     analysisFailed: false,
   };

@@ -92,10 +92,17 @@ export class PdfWriter {
     return undefined;
   }
 
-  /** 页面是否显式设置了 CropBox（含继承） */
-  hasCropBox(index: number): boolean {
+  /** 页面节点自身是否直接设置了 CropBox（不含继承） */
+  hasDirectCropBox(index: number): boolean {
     const node = this.getPageNode(index);
     return node.get(PDFName.of('CropBox')) instanceof PDFArray;
+  }
+
+  /** 页面是否拥有生效的 CropBox（含沿 Page Tree 继承；H2-1） */
+  hasEffectiveCropBox(index: number): boolean {
+    const node = this.getPageNode(index);
+    const v = node.getInheritableAttribute(PDFName.of('CropBox'));
+    return v instanceof PDFArray;
   }
 
   getPageBoxes(index: number): PageBoxes {
@@ -107,7 +114,8 @@ export class PdfWriter {
       page.getMediaBox().height
     );
     const node = this.getPageNode(index);
-    const crop = this.hasCropBox(index)
+    // effectiveCrop = page.getCropBox()（含继承，缺省 fallback MediaBox）
+    const crop = this.hasEffectiveCropBox(index)
       ? (() => {
           const r = page.getCropBox();
           return boxFromRect(r.x, r.y, r.width, r.height);

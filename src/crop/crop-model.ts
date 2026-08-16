@@ -8,8 +8,10 @@ export interface PageAnalysis {
   pageIndex: number;
   /** 页面 MediaBox（未旋转坐标） */
   mediaBox: PageBox;
-  /** 页面当前 CropBox（未旋转坐标；缺省时等于 MediaBox） */
+  /** 页面当前可见区域（未旋转坐标；effectiveCrop，含继承，缺省 = MediaBox） */
   cropBox: PageBox;
+  /** 原始可见区域（未旋转坐标；首次裁剪时 = 当前，重新裁剪时 = 恢复的原始 effectiveCrop） */
+  originalVisibleBox: PageBox;
   /** 检测到的内容包围盒（未旋转坐标；空白页为 null） */
   contentBox: PageBox | null;
   /** 页面旋转（0/90/180/270，顺时针） */

@@ -35,6 +35,7 @@ export type CropErrorKind =
   | 'no-restore-data' // 恢复时没有元数据
   | 'restore-mismatch' // 恢复数据页数与文档不符
   | 'io'              // 文件系统错误
+  | 'source-changed'  // 处理期间源文件被其他程序修改（H1：不覆盖新版本）
   | 'validation'      // 输出校验失败
   | 'unsupported'     // 其他不支持的情况
   | 'unknown';
@@ -88,6 +89,15 @@ export class CropService {
     const progress = request.onProgress ?? (() => {});
     const replacer = new SafeReplacer(fs);
 
+    // 0. H1：记录源文件指纹（size + mtime）；替换前必须一致，
+    //    否则处理期间（可能数十秒/数百页）被其他程序修改的版本会被旧版覆盖。
+    let beforeStat;
+    try {
+      beforeStat = await fs.stat(targetPath);
+    } catch (e) {
+      throw new CropError('io', '无法读取原 PDF 文件状态。', e);
+    }
+
     // 1. 安全检测
     if (PdfWriter.scanForDigitalSignature(data)) {
       throw new CropError(
@@ -126,30 +136,44 @@ export class CropService {
     } else {
       const boxes: PageBoxes[] = [];
       for (let i = 0; i < pageCount; i++) boxes.push(writer.getPageBoxes(i));
-      restoreMetadata = createRestoreMetadata(boxes.map((b) => ({ crop: b.crop })));
+      restoreMetadata = createRestoreMetadata(
+        boxes.map((b, idx) => ({
+          effectiveCrop: b.crop,
+          hadDirectCrop: writer.hasDirectCropBox(idx),
+        }))
+      );
     }
 
     // 4. 逐页渲染分析。
-    // H2-1：二次裁剪必须基于「原始可见区域」分析，而不是当前（已被裁剪的）CropBox。
-    // 有恢复元数据时，先在内存中把 CropBox 恢复为原始值，再用该副本做渲染分析。
+    // H2-1（上一轮）：重新裁剪必须基于「原始可见区域」分析，而不是当前 CropBox。
+    // H2-3（本轮）：只有「重新裁剪」才需要生成恢复原始 CropBox 的分析副本；
+    // 首次裁剪时原文件就是 Original View，直接分析原输入（避免大文件双倍内存）。
     let analysisData: Uint8Array = data;
-    if (restoreMetadata) {
+    if (existing) {
       const analysisWriter = await PdfWriter.open(data);
       for (let i = 0; i < pageCount; i++) {
-        analysisWriter.setPageCrop(i, restoreMetadata.pages[i].crop);
+        analysisWriter.setPageCrop(i, restoreMetadata.pages[i].effectiveCrop);
       }
       analysisData = await analysisWriter.save();
     }
-    const pdfHandle = await this.openPdf(analysisData, pdfOptions);
-    try {
-      const analyses = await this.analyzeAllPages(pdfHandle, writer, pageCount, dpi, progress, config);
-
+    let analyses: PageAnalysis[];
+    {
+      const pdfHandle = await this.openPdf(analysisData, pdfOptions);
+      try {
+        analyses = await this.analyzeAllPages(pdfHandle, writer, pageCount, dpi, progress, config, restoreMetadata);
+      } finally {
+        // 分析完成即释放 pdf.js 文档，降低大书处理的内存峰值（H2-3）
+        pdfHandle.destroy();
+      }
+    }
+    {
       // 5. 布局 + 稳定化
+
       const layout = analyzeLayout(analyses, config);
       const pageCrops = computePageCrops(analyses, layout, config);
 
-      const changed = pageCrops.filter((c) => c.changed);
-      if (changed.length === 0) {
+      // 初步判断：没有任何页需要变化则直接返回（不写文件）
+      if (pageCrops.every((c) => !c.changed)) {
         log.info('No crop needed for any page');
         return {
           status: 'no-change',
@@ -160,20 +184,38 @@ export class CropService {
         };
       }
 
-      // 6. 应用裁剪框 + 写入恢复元数据（首次）。
-      // H2-2：最终 CropBox 必须 ⊆ 原始可见区域（Original CropBox ∩ MediaBox），
+      // 6. 最终裁剪框 + 重算 changed（P1-2）。
+      // H2-2：最终 CropBox 必须 ⊆ 原始可见区域（Original effectiveCrop ∩ MediaBox），
       // 绝不 reveal 用户原本看不到的内容（裁切线/出血/印刷标记）。
+      let changedCount = 0;
       for (const crop of pageCrops) {
-        if (!crop.changed) continue;
         const boxes = writer.getPageBoxes(crop.pageIndex);
-        const baseVisible = restoreMetadata.pages[crop.pageIndex].crop ?? boxes.media;
+        const currentVisible = boxes.crop ?? boxes.media;
+        const baseVisible = restoreMetadata.pages[crop.pageIndex].effectiveCrop ?? boxes.media;
         const finalCrop = clampBox(crop.cropBox, baseVisible);
-        if (!boxesEqual(finalCrop, crop.cropBox)) {
+        const changed = !boxesEqual(finalCrop, currentVisible);
+        if (changed && !boxesEqual(finalCrop, crop.cropBox)) {
           log.debug(`page ${crop.pageIndex + 1}: crop clamped to original visible box`);
         }
         crop.cropBox = finalCrop;
-        writer.setPageCrop(crop.pageIndex, finalCrop);
-        progress('applying', crop.pageIndex + 1, pageCount);
+        crop.changed = changed;
+        if (changed) changedCount++;
+      }
+      if (changedCount === 0) {
+        // clamp 后实际无变化：不重写文件（避免无意义的 rewrite 与 sync 上传）
+        return {
+          status: 'no-change',
+          pageCount,
+          changedPageCount: 0,
+          pageCrops,
+          message: '未检测到需要调整的白边（裁剪结果与当前页面一致）',
+        };
+      }
+      for (const crop of pageCrops) {
+        if (crop.changed) {
+          writer.setPageCrop(crop.pageIndex, crop.cropBox);
+          progress('applying', crop.pageIndex + 1, pageCount);
+        }
       }
       writer.setRestoreMetadata(restoreMetadata);
 
@@ -196,6 +238,21 @@ export class CropService {
       } catch (e) {
         throw new CropError('io', '写入临时文件失败，原文件未做任何修改。', e);
       }
+      // H1：替换前校验源文件未被其他程序修改（Zotero Sync/Dropbox/外部编辑器）
+      try {
+        const nowStat = await fs.stat(targetPath);
+        if (nowStat.size !== beforeStat.size || nowStat.lastModified !== beforeStat.lastModified) {
+          await replacer.cleanup(tempPath);
+          throw new CropError(
+            'source-changed',
+            '处理期间 PDF 已被其他程序修改，为避免覆盖新版本，本次裁剪已取消。原文件未做修改。'
+          );
+        }
+      } catch (e) {
+        if (e instanceof CropError) throw e;
+        await replacer.cleanup(tempPath);
+        throw new CropError('io', '替换前校验源文件失败，原文件未做任何修改。', e);
+      }
       try {
         await replacer.replace(tempPath, targetPath);
       } catch (e) {
@@ -203,16 +260,14 @@ export class CropService {
         throw new CropError('io', '替换原文件失败，原文件未做任何修改。', e);
       }
 
-      log.info(`Cropped ${changed.length}/${pageCount} pages -> ${targetPath}`);
+      log.info(`Cropped ${changedCount}/${pageCount} pages -> ${targetPath}`);
       return {
         status: 'cropped',
         pageCount,
-        changedPageCount: changed.length,
+        changedPageCount: changedCount,
         pageCrops,
         message: 'PDF 白边裁剪完成',
       };
-    } finally {
-      pdfHandle.destroy();
     }
   }
 
@@ -246,11 +301,13 @@ export class CropService {
     for (let i = 0; i < pageCount; i++) {
       const current = writer.getPageBoxes(i);
       const saved = metadata.pages[i];
-      // 比较「当前可见区域」与「原始可见区域」（crop 为 null 时等于 MediaBox）
+      // 比较「当前可见区域」与「原始可见区域」（effectiveCrop 为 null 时等于 MediaBox）
       const curVisible = current.crop ?? current.media;
-      const savedVisible = saved.crop ?? current.media;
+      const savedVisible = saved.effectiveCrop ?? current.media;
       if (!boxesEqual(curVisible, savedVisible)) {
-        writer.restorePageBoxes(i, { crop: saved.crop });
+        // H2-1：原本直接声明过 CropBox → 恢复原值；否则删除插件写入的 CropBox，
+        // 恢复对父节点 CropBox 的继承
+        writer.setPageCrop(i, saved.hadDirectCrop ? saved.effectiveCrop : null);
         changed++;
       }
     }
@@ -287,7 +344,8 @@ export class CropService {
     pageCount: number,
     dpi: number,
     progress: NonNullable<CropRequest['onProgress']>,
-    config: CropConfig
+    config: CropConfig,
+    restoreMetadata: RestoreMetadata
   ): Promise<PageAnalysis[]> {
     const analyses: PageAnalysis[] = [];
     const pixelOptions: PixelAnalyzeOptions = {
@@ -298,6 +356,8 @@ export class CropService {
       const boxes = writer.getPageBoxes(i);
       const rotation = writer.getPageRotation(i);
       const visibleBox = boxes.crop ?? boxes.media;
+      // P1-1：原始可见区域（重新裁剪时来自恢复元数据，首次裁剪时 = 当前）
+      const originalVisibleBox = restoreMetadata.pages[i].effectiveCrop ?? boxes.media;
       let analysis: PageAnalysis;
       try {
         // 非嵌入字体页：渲染可能缺字导致内容盒漏检 → 标记失败（不裁剪，安全优先）
@@ -307,6 +367,7 @@ export class CropService {
             pageIndex: i,
             mediaBox: boxes.media,
             cropBox: visibleBox,
+            originalVisibleBox,
             contentBox: null,
             rotation,
             isBlank: false,
@@ -324,6 +385,7 @@ export class CropService {
               pageIndex: i,
               mediaBox: boxes.media,
               cropBox: visibleBox,
+              originalVisibleBox,
               contentBox: null,
               rotation,
               isBlank: false,
@@ -353,6 +415,7 @@ export class CropService {
             pageIndex: i,
             mediaBox: boxes.media,
             cropBox: visibleBox,
+            originalVisibleBox,
             contentBox,
             rotation,
             isBlank: px.contentBox === null,
@@ -367,6 +430,7 @@ export class CropService {
           pageIndex: i,
           mediaBox: boxes.media,
           cropBox: visibleBox,
+          originalVisibleBox,
           contentBox: null,
           rotation,
           isBlank: false,

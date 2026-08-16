@@ -18,18 +18,22 @@ export const RESTORE_XMP_NS = 'https://github.com/gjjisadog/zotero-pdf-auto-crop
 const RESTORE_XMP_TAG = 'zpac:originalBoxes';
 
 export interface RestoreMetadata {
-  /** 2：仅保存每页原始 CropBox（crop 可为 null = 原本无 CropBox；P1-1 只写 CropBox） */
-  version: 2;
+  /**
+   * 3：每页保存「生效的原始 CropBox」（含继承，H2-1）与「是否直接声明过 CropBox」。
+   * effectiveCrop: null = 无任何 CropBox（含继承），显示即 MediaBox；
+   * hadDirectCrop: 页面节点自身是否直接写了 CropBox（恢复时决定 set 还是 delete）。
+   */
+  version: 3;
   plugin: 'zotero-pdf-auto-crop';
   createdAt: string;
-  pages: { crop: PageBox | null }[];
+  pages: { effectiveCrop: PageBox | null; hadDirectCrop: boolean }[];
 }
 
 export function createRestoreMetadata(
-  pages: { crop: PageBox | null }[]
+  pages: { effectiveCrop: PageBox | null; hadDirectCrop: boolean }[]
 ): RestoreMetadata {
   return {
-    version: 2,
+    version: 3,
     plugin: 'zotero-pdf-auto-crop',
     createdAt: new Date().toISOString(),
     pages,
@@ -144,19 +148,34 @@ function validateRestoreMetadata(value: unknown): RestoreMetadata | null {
   if (v.plugin !== 'zotero-pdf-auto-crop' || !Array.isArray(v.pages)) {
     return null;
   }
-  const isValidBox = (b: any) =>
-    b && typeof b === 'object' &&
-    typeof b.left === 'number' && typeof b.bottom === 'number' &&
-    typeof b.right === 'number' && typeof b.top === 'number';
-  for (const p of v.pages) {
-    if (p.crop !== null && !isValidBox(p.crop)) return null;
+  // P1-3：严格校验——版本必须在 {1,2,3}，坐标必须有限且几何合法
+  if (v.version !== 1 && v.version !== 2 && v.version !== 3) {
+    return null;
   }
-  // 接受 version 1（旧格式含 media/trim 等，仅用其 crop 字段）与 version 2
+  const isValidBox = (b: any): b is PageBox =>
+    !!b && typeof b === 'object' &&
+    typeof b.left === 'number' && Number.isFinite(b.left) &&
+    typeof b.bottom === 'number' && Number.isFinite(b.bottom) &&
+    typeof b.right === 'number' && Number.isFinite(b.right) &&
+    typeof b.top === 'number' && Number.isFinite(b.top) &&
+    b.left < b.right &&
+    b.bottom < b.top;
   const normalized: RestoreMetadata = {
-    version: 2,
+    version: 3,
     plugin: 'zotero-pdf-auto-crop',
     createdAt: typeof v.createdAt === 'string' ? v.createdAt : new Date().toISOString(),
-    pages: v.pages.map((p: any) => ({ crop: p.crop ?? null })),
+    pages: [],
   };
+  for (const p of v.pages) {
+    // v1/v2 用 crop 字段；v3 用 effectiveCrop/hadDirectCrop
+    const crop = v.version === 3 ? p.effectiveCrop : p.crop;
+    if (crop !== null && crop !== undefined && !isValidBox(crop)) {
+      return null;
+    }
+    normalized.pages.push({
+      effectiveCrop: crop ?? null,
+      hadDirectCrop: v.version === 3 ? !!p.hadDirectCrop : crop != null,
+    });
+  }
   return normalized;
 }

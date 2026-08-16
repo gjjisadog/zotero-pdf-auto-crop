@@ -3,53 +3,62 @@
  *
  * 规则：
  * - 正常组（normal/odd/even）：组内所有内容盒的并集 + 安全边距（显示方向），
- *   组内所有页共用同一个 CropBox，避免翻页跳动；
- * - 异常页/空白页/失败页：单独处理——异常页用该页自身内容盒 + 安全边距
- *   （通常等于几乎不裁剪）；空白页/失败页保持当前 CropBox 不动；
+ *   组内所有页共用同一个「显示局部（display-local）」裁剪框，避免翻页跳动；
+ * - 组级统计统一在 display-local 坐标进行（H2-2）：每页用自己的 MediaBox
+ *   转局部坐标——同尺寸但 MediaBox 原点不同的页面可以安全同组；
+ *   最终每页用自己的 MediaBox 逆变换回绝对坐标；
+ * - 特殊页（blank/dark/outlier）：保持「原始可见区域」不变（P1-1），
+ *   即重新裁剪时也恢复为原始状态，而不是保留上一次裁剪的结果；
  * - 裁剪量上限：单边不超过页面尺寸的 maxCropFraction（防误检过度裁剪）；
- * - 安全钳制：CropBox 必须完全包含组内所有正常页的内容盒（绝不切内容）。
+ * - 安全钳制：裁剪框必须完全包含组内所有正常页的内容盒（绝不切内容）。
  */
 import type { PageAnalysis, PageCrop, CropConfig, DocumentLayout, PageGroupKind } from './crop-model';
 import type { PageBox } from './bounding-box';
-import { boxUnion, boxContains, expandBox, clampBox, boxWidth, boxHeight, boxIntersect } from './bounding-box';
+import { boxUnion, boxContains, expandBox, clampBox, boxIntersect } from './bounding-box';
 import { pdfBoxToDisplay, displayBoxToPdf, displaySize, boxToSize } from './rotation';
 
-/** 组内所有页共用的裁剪框（未旋转坐标） */
-function computeGroupCropBox(analyses: PageAnalysis[], indexes: number[], config: CropConfig): PageBox {
+/**
+ * 组内所有页共用的裁剪框（display-local 坐标，左下原点）。
+ * 组内每页用自己的 MediaBox 把绝对内容盒转到 display-local（H2-2），
+ * 因此同尺寸不同 MediaBox 原点的页面可以安全同组。
+ */
+function computeGroupDisplayCropBox(
+  analyses: PageAnalysis[],
+  indexes: number[],
+  config: CropConfig
+): PageBox {
   const rep = analyses[indexes[0]];
-  const mediaBox = rep.mediaBox;
-  const size = boxToSize(mediaBox);
+  const size = boxToSize(rep.mediaBox);
   const rotation = rep.rotation as 0 | 90 | 180 | 270;
 
-  // 显示坐标并集（H2-3：传入完整 mediaBox，内部先转局部坐标）
+  // display-local 并集（每页用自己的 MediaBox）
   let union: PageBox | null = null;
   for (const idx of indexes) {
-    const cb = analyses[idx].contentBox;
+    const a = analyses[idx];
+    const cb = a.contentBox;
     if (!cb) continue;
-    const display = pdfBoxToDisplay(cb, mediaBox, rotation);
+    const display = pdfBoxToDisplay(cb, a.mediaBox, rotation);
     union = union ? boxUnion(union, display) : display;
   }
-  if (!union) return { ...mediaBox };
+  if (!union) {
+    // 无内容：返回全显示区域（不裁剪）
+    const d = displaySize(size, rotation);
+    return { left: 0, bottom: 0, right: d.width, top: d.height };
+  }
 
-  // 显示坐标 + 安全边距 → 未旋转坐标
-  let crop = displayBoxToPdf(
-    expandBox(union, config.safeMarginPt),
-    mediaBox,
-    rotation
-  );
-  crop = clampBox(crop, mediaBox);
+  // display-local + 安全边距
+  const expanded = expandBox(union, config.safeMarginPt);
 
   // 裁剪量上限（显示方向）：每边最多裁掉 maxCropFraction × 对应显示尺寸，
   // 防止误检（如扫描黑边）导致过度裁剪。
   const display = displaySize(size, rotation);
-  const displayCrop = pdfBoxToDisplay(crop, mediaBox, rotation);
   const maxCropW = display.width * config.maxCropFraction;
   const maxCropH = display.height * config.maxCropFraction;
   const limited: PageBox = {
-    left: Math.min(displayCrop.left, maxCropW),
-    bottom: Math.min(displayCrop.bottom, maxCropH),
-    right: Math.max(displayCrop.right, display.width - maxCropW),
-    top: Math.max(displayCrop.top, display.height - maxCropH),
+    left: Math.min(expanded.left, maxCropW),
+    bottom: Math.min(expanded.bottom, maxCropH),
+    right: Math.max(expanded.right, display.width - maxCropW),
+    top: Math.max(expanded.top, display.height - maxCropH),
   };
   // 防御：限制后仍保证有效矩形
   const safeDisplay: PageBox = {
@@ -58,7 +67,7 @@ function computeGroupCropBox(analyses: PageAnalysis[], indexes: number[], config
     right: Math.max(limited.right, limited.left + 1),
     top: Math.max(limited.top, limited.bottom + 1),
   };
-  return displayBoxToPdf(safeDisplay, mediaBox, rotation);
+  return safeDisplay;
 }
 
 export function computePageCrops(
@@ -70,46 +79,34 @@ export function computePageCrops(
 
   for (const group of layout.groups) {
     const kind: PageGroupKind = group.kind;
-    if (kind === 'blank' || kind === 'dark') {
-      // 空白页/失败页/深色背景页：不动
+    if (kind === 'blank' || kind === 'dark' || kind === 'outlier') {
+      // 特殊页（封面/目录/版权/整页图/空白/深色/附录）：保持「原始可见区域」不变（P1-1）。
+      // 重新裁剪时也恢复为原始状态，而不是保留上一次裁剪的结果。
       for (const idx of group.pageIndexes) {
         const a = analyses[idx];
+        const desired = { ...a.originalVisibleBox };
         result.push({
           pageIndex: idx,
-          cropBox: { ...a.cropBox },
+          cropBox: desired,
           groupId: group.id,
           kind,
-          changed: false,
+          changed: !boxesEqualish(desired, a.cropBox),
         });
       }
       continue;
     }
-    if (kind === 'outlier') {
-      // 特殊页（封面/版权/目录/整页图/附录等）：保持原样，不裁剪。
-      // 用户诉求：带封面的书只裁剪正文，特殊页不去管它。
-      for (const idx of group.pageIndexes) {
-        const a = analyses[idx];
-        result.push({
-          pageIndex: idx,
-          cropBox: { ...a.cropBox },
-          groupId: group.id,
-          kind,
-          changed: false,
-        });
-      }
-      continue;
-    }
-    // normal / odd / even：组内统一框
-    const groupBox = computeGroupCropBox(analyses, group.pageIndexes, config);
-    // 安全校验：组内每个正常页的内容盒必须完全在裁剪框内
-    // （并集保证不会违反，这里做防御性检查并回退到不裁剪）
+    // normal / odd / even：组内统一 display-local 框，每页用自己的 MediaBox 逆变换
+    const groupDisplay = computeGroupDisplayCropBox(analyses, group.pageIndexes, config);
+    const rotation = analyses[group.pageIndexes[0]].rotation as 0 | 90 | 180 | 270;
     for (const idx of group.pageIndexes) {
       const a = analyses[idx];
+      // display-local → 该页绝对坐标（H2-2：每页用自己的 MediaBox 原点）
+      const groupBox = displayBoxToPdf(groupDisplay, a.mediaBox, rotation);
+      // 安全校验：内容盒必须完全在裁剪框内（并集保证，防御性检查回退到不裁剪）
       if (a.contentBox && !boxContains(groupBox, a.contentBox)) {
-        // 防御：任何内容被切 → 该页不裁剪（安全优先）
         result.push({
           pageIndex: idx,
-          cropBox: { ...a.cropBox },
+          cropBox: { ...a.originalVisibleBox },
           groupId: group.id,
           kind,
           changed: false,
@@ -141,3 +138,5 @@ function boxesEqualish(a: PageBox, b: PageBox, epsilon = 0.05): boolean {
     Math.abs(a.top - b.top) < epsilon
   );
 }
+
+void clampBox;

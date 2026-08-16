@@ -125,8 +125,9 @@ describe('integration: crop pipeline', () => {
     // 核心语义：多次裁剪不覆盖原始盒（恢复元数据始终指向最初状态）
     const info = (afterSecond as any).context.lookup((afterSecond as any).context.trailerInfo.Info);
     const restore = JSON.parse(info.get(PDFName.of('ZoteroPdfAutoCropRestore')).decodeText());
-    // fixture 01 原本没有 CropBox（显示即 MediaBox）→ 恢复元数据应为 null（P1-1 精确语义）
-    expect(restore.pages[0].crop).toBeNull();
+    // fixture 01 原本没有 CropBox（显示即 MediaBox）→ 元数据 effectiveCrop=null（H2-1 精确语义）
+    expect(restore.pages[0].effectiveCrop).toBeNull();
+    expect(restore.pages[0].hadDirectCrop).toBe(false);
 
     // 强验证：手动把 CropBox 篡改成错误值后再次裁剪，必须仍能恢复正确裁剪
     // （证明分析基于原始盒，而不是当前被篡改的 CropBox）
