@@ -12,21 +12,21 @@
 import type { PageAnalysis, PageCrop, CropConfig, DocumentLayout, PageGroupKind } from './crop-model';
 import type { PageBox } from './bounding-box';
 import { boxUnion, boxContains, expandBox, clampBox, boxWidth, boxHeight, boxIntersect } from './bounding-box';
-import { pdfBoxToDisplay, displayBoxToPdf, displaySize } from './rotation';
+import { pdfBoxToDisplay, displayBoxToPdf, displaySize, boxToSize } from './rotation';
 
 /** 组内所有页共用的裁剪框（未旋转坐标） */
 function computeGroupCropBox(analyses: PageAnalysis[], indexes: number[], config: CropConfig): PageBox {
   const rep = analyses[indexes[0]];
   const mediaBox = rep.mediaBox;
-  const size = { width: boxWidth(mediaBox), height: boxHeight(mediaBox) };
+  const size = boxToSize(mediaBox);
   const rotation = rep.rotation as 0 | 90 | 180 | 270;
 
-  // 显示坐标并集
+  // 显示坐标并集（H2-3：传入完整 mediaBox，内部先转局部坐标）
   let union: PageBox | null = null;
   for (const idx of indexes) {
     const cb = analyses[idx].contentBox;
     if (!cb) continue;
-    const display = pdfBoxToDisplay(cb, size, rotation);
+    const display = pdfBoxToDisplay(cb, mediaBox, rotation);
     union = union ? boxUnion(union, display) : display;
   }
   if (!union) return { ...mediaBox };
@@ -34,7 +34,7 @@ function computeGroupCropBox(analyses: PageAnalysis[], indexes: number[], config
   // 显示坐标 + 安全边距 → 未旋转坐标
   let crop = displayBoxToPdf(
     expandBox(union, config.safeMarginPt),
-    size,
+    mediaBox,
     rotation
   );
   crop = clampBox(crop, mediaBox);
@@ -42,7 +42,7 @@ function computeGroupCropBox(analyses: PageAnalysis[], indexes: number[], config
   // 裁剪量上限（显示方向）：每边最多裁掉 maxCropFraction × 对应显示尺寸，
   // 防止误检（如扫描黑边）导致过度裁剪。
   const display = displaySize(size, rotation);
-  const displayCrop = pdfBoxToDisplay(crop, size, rotation);
+  const displayCrop = pdfBoxToDisplay(crop, mediaBox, rotation);
   const maxCropW = display.width * config.maxCropFraction;
   const maxCropH = display.height * config.maxCropFraction;
   const limited: PageBox = {
@@ -58,7 +58,7 @@ function computeGroupCropBox(analyses: PageAnalysis[], indexes: number[], config
     right: Math.max(limited.right, limited.left + 1),
     top: Math.max(limited.top, limited.bottom + 1),
   };
-  return displayBoxToPdf(safeDisplay, size, rotation);
+  return displayBoxToPdf(safeDisplay, mediaBox, rotation);
 }
 
 export function computePageCrops(

@@ -291,4 +291,37 @@ function makeScannedPageImage(wPt, hPt, seed = 1) {
   await writeFile(join(OUT, '10-annotated.pdf'), await doc.save());
 }
 
+// ---------- 11 非零 MediaBox 原点（[20 30 632 822]） ----------
+{
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (let p = 0; p < 2; p++) {
+    const page = doc.addPage([612, 792]);
+    page.setMediaBox(20, 30, 612, 792);
+    page.drawText('Nonzero origin page title', { x: 20 + 80, y: 30 + 690, size: 18, font, color: INK });
+    for (let i = 0; i < 20; i++) {
+      page.drawText(`Line ${i + 1}: lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt.`,
+        { x: 20 + 80, y: 30 + 650 - i * 14, size: 10, font, color: INK, maxWidth: 452 });
+    }
+  }
+  await writeFile(join(OUT, '11-nonzero-mediabox.pdf'), await doc.save());
+}
+
+// ---------- 12 负原点 MediaBox + 旋转 90（[-20 -30 592 762]） ----------
+{
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (let p = 0; p < 2; p++) {
+    const page = doc.addPage([612, 792]);
+    page.setMediaBox(-20, -30, 612, 792);
+    page.setRotation({ type: 'degrees', angle: 90 });
+    page.drawText('Negative origin rotated title', { x: -20 + 90, y: -30 + 560, size: 16, font, color: INK });
+    for (let i = 0; i < 14; i++) {
+      page.drawText(`Rotated line ${i + 1}: lorem ipsum dolor sit amet consectetur.`,
+        { x: -20 + 90, y: -30 + 520 - i * 14, size: 10, font, color: INK, maxWidth: 420 });
+    }
+  }
+  await writeFile(join(OUT, '12-negative-origin-rotated.pdf'), await doc.save());
+}
+
 console.log('fixtures generated in', OUT);

@@ -36,15 +36,10 @@ export class ZoteroFileSystem implements FileSystem {
     await IOUtils.write(path, data);
   }
   async moveReplace(src: string, dest: string): Promise<void> {
-    try {
-      await IOUtils.move(src, dest, { noOverwrite: false });
-    } catch (e) {
-      // Windows：目标被占用时 IOUtils.move 可能失败；尝试删除后移动
-      if (await IOUtils.exists(dest)) {
-        await IOUtils.remove(dest, { ignoreAbsent: true });
-      }
-      await IOUtils.move(src, dest, { noOverwrite: false });
-    }
+    // 覆盖式移动（同目录 rename）。失败（如 Windows 下目标被占用）时
+    // 原文件必须保持不动——绝不在失败后先删除目标再重试，
+    // 否则第二次移动失败会导致原 PDF 丢失（H1-1）。
+    await IOUtils.move(src, dest, { noOverwrite: false });
   }
   async remove(path: string): Promise<void> {
     await IOUtils.remove(path, { ignoreAbsent: true });
@@ -62,11 +57,13 @@ export class ZoteroFileSystem implements FileSystem {
 export class SafeReplacer {
   constructor(private readonly fs: FileSystem) {}
 
-  /** 生成同目录临时文件路径 */
+  /** 生成同目录临时文件路径（跨平台：同时处理 '/' 与 '\\' 分隔符） */
   static tempPathFor(targetPath: string): string {
-    const dir = targetPath.includes('/') ? targetPath.slice(0, targetPath.lastIndexOf('/')) : '.';
-    const base = targetPath.slice(targetPath.lastIndexOf('/') + 1);
-    return `${dir}/.${base}.zpac.tmp.pdf`;
+    const idx = Math.max(targetPath.lastIndexOf('/'), targetPath.lastIndexOf('\\'));
+    const dir = idx >= 0 ? targetPath.slice(0, idx) : '.';
+    const base = idx >= 0 ? targetPath.slice(idx + 1) : targetPath;
+    const sep = targetPath.includes('\\') ? '\\' : '/';
+    return `${dir}${sep}.${base}.zpac.tmp.pdf`;
   }
 
   /**

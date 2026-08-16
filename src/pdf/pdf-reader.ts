@@ -230,14 +230,8 @@ export function contentBoxToMediaBoxCoords(
   view: PageBox,
   rotation: number
 ): PageBox {
-  const viewSize = { width: view.right - view.left, height: view.top - view.bottom };
-  const unrotated = displayBoxToPdf(contentBoxDisplay, viewSize, rotation as 0 | 90 | 180 | 270);
-  return {
-    left: unrotated.left + view.left,
-    bottom: unrotated.bottom + view.bottom,
-    right: unrotated.right + view.left,
-    top: unrotated.top + view.bottom,
-  };
+  // H2-3：displayBoxToPdf 接收完整 view（含原点），内部做局部坐标旋转并加回原点
+  return displayBoxToPdf(contentBoxDisplay, view, rotation as 0 | 90 | 180 | 270);
 }
 
 /** 显示坐标像素 → 显示坐标 pt（y 翻转） */

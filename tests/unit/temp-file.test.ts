@@ -60,6 +60,40 @@ describe('temp-file (atomic replace)', () => {
     expect(new Uint8Array(await readFile(target))).toEqual(new Uint8Array([1, 2, 3]));
   });
 
+  it('tempPathFor：Windows 路径（反斜杠分隔符）', () => {
+    const p = SafeReplacer.tempPathFor('C:\\Users\\wxw\\Zotero\\storage\\ABC\\paper.pdf');
+    expect(p).toBe('C:\\Users\\wxw\\Zotero\\storage\\ABC\\.paper.pdf.zpac.tmp.pdf');
+  });
+
+  it('tempPathFor：POSIX 路径', () => {
+    const p = SafeReplacer.tempPathFor('/Users/wxw/Zotero/storage/ABC/paper.pdf');
+    expect(p).toBe('/Users/wxw/Zotero/storage/ABC/.paper.pdf.zpac.tmp.pdf');
+  });
+
+  it('moveReplace 失败（Windows 文件占用）：原文件保留、绝不先删目标', async () => {
+    const target = join(dir, 'paper.pdf');
+    const original = new Uint8Array([1, 2, 3, 4]);
+    await writeFile(target, original);
+    const replacer = new SafeReplacer(fs);
+
+    const temp = await replacer.stage(target, new Uint8Array([9, 9]));
+    // 模拟 IOUtils.move 在目标被占用时抛错（且没有"删除目标"的 fallback）
+    const lockedFs = {
+      ...fs,
+      moveReplace: async () => {
+        throw new Error('NS_ERROR_FILE_TARGET_DOES_NOT_EXIST / EBUSY (simulated)');
+      },
+    };
+    const lockedReplacer = new SafeReplacer(lockedFs as any);
+
+    await expect(lockedReplacer.replace(temp, target)).rejects.toThrow();
+    // 原文件必须原封不动
+    expect(new Uint8Array(await readFile(target))).toEqual(original);
+    // 临时文件可清理
+    await replacer.cleanup(temp);
+    expect(await fs.exists(temp)).toBe(false);
+  });
+
   it('连续替换（多次裁剪）不残留临时文件', async () => {
     const target = join(dir, 'paper.pdf');
     await writeFile(target, new Uint8Array([1]));
