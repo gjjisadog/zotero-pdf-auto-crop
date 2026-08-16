@@ -133,7 +133,7 @@ describe('stabilization', () => {
     }
   });
 
-  it('异常页：只用自身内容盒，不因整页图破坏组裁剪', () => {
+  it('异常页（封面/目录/整页图）：保持原样完全不裁剪，不因整页图破坏组裁剪', () => {
     const analyses = [
       paperPage(0, { content: { left: 0, bottom: 0, right: 595.28, top: 841.89 } }),
       paperPage(1),
@@ -143,12 +143,32 @@ describe('stabilization', () => {
     const crops = computePageCrops(analyses, layout, DEFAULT_CROP_CONFIG);
     const pad = DEFAULT_CROP_CONFIG.safeMarginPt;
     const c0 = crops.find((c) => c.pageIndex === 0)!;
-    // 异常页几乎不裁剪
-    expect(c0.cropBox.left).toBeCloseTo(0, 1);
-    expect(c0.cropBox.right).toBeCloseTo(595.28, 1);
+    // 异常页完全不裁剪（用户诉求：封面目录不去管他）
+    expect(c0.changed).toBe(false);
+    expect(c0.cropBox).toEqual(analyses[0].cropBox);
     // 正常页正常裁剪
     const c1 = crops.find((c) => c.pageIndex === 1)!;
     expect(c1.cropBox.left).toBeCloseTo(100 - pad, 4);
+  });
+
+  it('带封面的书：封面不裁剪，正文页统一裁剪', () => {
+    // 页 0 封面（内容占满），页 1-3 正文
+    const analyses = [
+      paperPage(0, { content: { left: 0, bottom: 0, right: 595.28, top: 841.89 } }),
+      paperPage(1),
+      paperPage(2),
+      paperPage(3),
+    ];
+    const layout = analyzeLayout(analyses, DEFAULT_CROP_CONFIG);
+    const crops = computePageCrops(analyses, layout, DEFAULT_CROP_CONFIG);
+    const pad = DEFAULT_CROP_CONFIG.safeMarginPt;
+    const cover = crops.find((c) => c.pageIndex === 0)!;
+    expect(cover.changed).toBe(false);
+    const body = crops.filter((c) => c.pageIndex > 0);
+    for (const c of body) {
+      expect(c.changed).toBe(true);
+      expect(c.cropBox.left).toBeCloseTo(100 - pad, 4);
+    }
   });
 
   it('空白页不裁剪', () => {

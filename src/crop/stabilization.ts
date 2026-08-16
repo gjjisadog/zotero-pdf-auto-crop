@@ -61,17 +61,6 @@ function computeGroupCropBox(analyses: PageAnalysis[], indexes: number[], config
   return displayBoxToPdf(safeDisplay, size, rotation);
 }
 
-/** 异常页单独处理：自身内容盒 + 安全边距（几乎不裁剪，保证安全） */
-function computeOutlierCropBox(analysis: PageAnalysis, config: CropConfig): PageBox {
-  const mediaBox = analysis.mediaBox;
-  if (!analysis.contentBox) return { ...analysis.cropBox };
-  const size = { width: boxWidth(mediaBox), height: boxHeight(mediaBox) };
-  const rotation = analysis.rotation as 0 | 90 | 180 | 270;
-  const display = pdfBoxToDisplay(analysis.contentBox, size, rotation);
-  let crop = displayBoxToPdf(expandBox(display, config.safeMarginPt), size, rotation);
-  return clampBox(crop, mediaBox);
-}
-
 export function computePageCrops(
   analyses: PageAnalysis[],
   layout: DocumentLayout,
@@ -96,15 +85,16 @@ export function computePageCrops(
       continue;
     }
     if (kind === 'outlier') {
+      // 特殊页（封面/版权/目录/整页图/附录等）：保持原样，不裁剪。
+      // 用户诉求：带封面的书只裁剪正文，特殊页不去管它。
       for (const idx of group.pageIndexes) {
         const a = analyses[idx];
-        const cropBox = computeOutlierCropBox(a, config);
         result.push({
           pageIndex: idx,
-          cropBox,
+          cropBox: { ...a.cropBox },
           groupId: group.id,
           kind,
-          changed: !boxesEqualish(cropBox, a.cropBox),
+          changed: false,
         });
       }
       continue;
