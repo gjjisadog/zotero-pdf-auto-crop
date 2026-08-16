@@ -7,6 +7,7 @@
 import { registerContextMenu, unregisterContextMenu, STANDARD_FONTS_URL } from './ui/context-menu';
 import { useZoteroLogger, log } from './utils/logger';
 import { CropService, type CropResult } from './crop/crop-service';
+import type { CropConfig } from './crop/crop-model';
 import { ZoteroFileSystem } from './utils/temp-file';
 import { createDefaultCanvasBackend } from './pdf/pdf-reader';
 
@@ -95,11 +96,10 @@ export class Addon {
    * 亦为 V2「导入后自动裁剪 / 批量裁剪」的预留 API（任务 §42–§43）。
    * 注意：仅供文件系统可直接访问的附件路径使用，不处理 Zotero item 状态。
    */
-  async cropFile(path: string): Promise<CropResult> {
+  async cropFile(path: string, config?: Partial<CropConfig>): Promise<CropResult> {
     log.info(`cropFile: ${path}`);
     const fs = new ZoteroFileSystem();
     const data = await fs.readFile(path);
-    log.info(`data: ${(data as any)?.constructor?.name} len=${(data as any)?.length} isArr=${data instanceof Uint8Array}`);
     const service = new CropService();
     return service.cropPdf({
       data,
@@ -109,7 +109,7 @@ export class Addon {
         standardFontDataUrl: STANDARD_FONTS_URL,
         canvasBackend: createDefaultCanvasBackend(),
       },
-      config: { requireEmbeddedFonts: true },
+      config: { requireEmbeddedFonts: true, ...config },
     });
   }
 
@@ -145,7 +145,8 @@ export class Addon {
       if (cropPath) {
         ran = true;
         log.info(`self-test crop: ${cropPath}`);
-        const r = await this.cropFile(cropPath);
+        // 实验：允许非嵌入字体渲染，验证 chrome:// standard fonts 可用性
+        const r = await this.cropFile(cropPath, { requireEmbeddedFonts: false });
         log.info(`self-test crop result: ${JSON.stringify(r)}`);
       }
       if (restorePath) {

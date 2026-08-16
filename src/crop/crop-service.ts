@@ -146,7 +146,7 @@ export class CropService {
           pageCount,
           changedPageCount: 0,
           pageCrops,
-          message: '未检测到需要裁剪的白边',
+          message: '未检测到明显白边，页面未做修改（内容已接近页面边缘，或页面使用了无法安全分析的字体）',
         };
       }
 
@@ -304,6 +304,23 @@ export class CropService {
         } else {
           const view = await pdfHandle.getView(i + 1);
           const rendered = await pdfHandle.renderPage(i + 1, dpi);
+          // 渲染期间检测到字体数据缺失（文字未画出）→ 内容盒不可靠 → 该页不裁剪
+          if (rendered.fontDataMissing) {
+            log.debug(`Page ${i + 1} font data missing during render; marking as failed (safe)`);
+            analysis = {
+              pageIndex: i,
+              mediaBox: boxes.media,
+              cropBox: boxes.crop,
+              contentBox: null,
+              rotation,
+              isBlank: false,
+              darkBackground: false,
+              isOutlier: false,
+              analysisFailed: true,
+            };
+            analyses.push(analysis);
+            continue;
+          }
           const px = analyzePagePixels(rendered, pixelOptions);
           // analyzePagePixels 已返回显示坐标（左下原点，y 向上，像素单位）：
           // 除以 scale 转为 pt 后，从显示坐标映射回未旋转 MediaBox 坐标

@@ -31,7 +31,7 @@ export interface PdfDocumentHandle {
   /** 页面当前可见区域（未旋转，= CropBox 或 MediaBox），1-based */
   getView(pageNumber: number): Promise<PageBox>;
   /** 渲染页面到指定 DPI 附近的位图（1-based）；scale 为实际渲染比例（可能降采样） */
-  renderPage(pageNumber: number, dpi: number): Promise<RenderedPage & { scale: number }>;
+  renderPage(pageNumber: number, dpi: number): Promise<RenderedPage & { scale: number; fontDataMissing: boolean }>;
   destroy(): void;
 }
 
@@ -161,7 +161,7 @@ export class PdfJsDocument implements PdfDocumentHandle {
     }
   }
 
-  async renderPage(pageNumber: number, dpi: number): Promise<RenderedPage & { scale: number }> {
+  async renderPage(pageNumber: number, dpi: number): Promise<RenderedPage & { scale: number; fontDataMissing: boolean }> {
     const page = await this.pdf.getPage(pageNumber);
     try {
       let scale = dpi / 72;
@@ -176,13 +176,32 @@ export class PdfJsDocument implements PdfDocumentHandle {
       const ch = Math.ceil(renderViewport.height);
       const canvas: any = this.backend.createCanvas(cw, ch);
       const ctx = canvas.getContext('2d');
-      await page.render({ canvasContext: ctx, viewport: renderViewport }).promise;
+
+      // 字体加载检测：standard fonts / 嵌入字体缺失时 pdf.js 只打 console 警告
+      // （文字不画出），静默失败会让内容盒漏检。渲染期间拦截警告标记该页。
+      let fontDataMissing = false;
+      const consoleAny = console as any;
+      const origWarn = consoleAny.warn;
+      consoleAny.warn = (...args: unknown[]) => {
+        const msg = args.map(String).join(' ');
+        if (/Unable to load font data|_path_|standardFontDataUrl|FetchStandardFontData/.test(msg)) {
+          fontDataMissing = true;
+        }
+        if (typeof origWarn === 'function') origWarn.apply(console, args);
+      };
+      try {
+        await page.render({ canvasContext: ctx, viewport: renderViewport }).promise;
+      } finally {
+        consoleAny.warn = origWarn;
+      }
+
       const image = ctx.getImageData(0, 0, cw, ch);
       return {
         width: cw,
         height: ch,
         data: new Uint8ClampedArray(image.data),
         scale,
+        fontDataMissing,
       };
     } finally {
       // cleanup 失败（如渲染中断后的状态不一致）不得掩盖原始渲染错误

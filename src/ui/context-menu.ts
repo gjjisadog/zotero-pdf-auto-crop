@@ -122,7 +122,6 @@ async function runWithSinglePdf(context: any, action: 'crop' | 'restore'): Promi
     const path = await getAttachmentPath(item);
     const data = await readAttachmentBytes(item);
     const service = new CropService();
-    const config = { requireEmbeddedFonts: true };
 
     if (action === 'crop') {
       const result = await service.cropPdf({
@@ -130,7 +129,6 @@ async function runWithSinglePdf(context: any, action: 'crop' | 'restore'): Promi
         targetPath: path,
         fs: new ZoteroFileSystem(),
         pdfOptions: { standardFontDataUrl: STANDARD_FONTS_URL, canvasBackend: createDefaultCanvasBackend() },
-        config,
         onProgress: (stage, page, total) => {
           const label =
             stage === 'analyzing' ? `正在分析 PDF… 第 ${page}/${total} 页`

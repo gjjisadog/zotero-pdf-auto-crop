@@ -68,9 +68,9 @@ export interface CropConfig {
   /** 奇偶分组：奇数页与偶数页左侧内容边中位数差异（相对页宽）超过该值才拆分 */
   oddEvenMarginDiffFraction: number;
   /**
-   * 要求页面字体全部嵌入：若页面引用非嵌入字体（标准 14 字体等），渲染可能
-   * 缺字导致内容盒漏检。Zotero 中 standard fonts 依赖 chrome:// 资源，
-   * 不可用时该页标记分析失败（不裁剪，安全优先）。测试环境可关闭。
+   * 强制保护：要求页面字体全部嵌入（非嵌入字体页不裁剪）。
+   * 默认关闭——Zotero 中 standard fonts（chrome://）可用时渲染可靠；
+   * 真实缺字场景由渲染期的字体加载检测（fontDataMissing）兜底。
    */
   requireEmbeddedFonts: boolean;
   /** 深色背景判定：背景灰度低于该值视为深色页（整页图等），不裁剪 */
@@ -85,6 +85,6 @@ export const DEFAULT_CROP_CONFIG: CropConfig = {
   blankAreaFraction: 0.0005,
   oddEvenMinPages: 8,
   oddEvenMarginDiffFraction: 0.015,
-  requireEmbeddedFonts: true,
+  requireEmbeddedFonts: false,
   darkBackgroundGray: 200,
 };
