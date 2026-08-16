@@ -25,9 +25,9 @@ export async function readAttachmentBytes(item: Zotero.Item): Promise<Uint8Array
   if (stat.size === 0) {
     throw new Error('PDF 文件为空');
   }
-  const data = await IOUtils.read(path);
-  log.debug(`read attachment ${item.libraryKey}: ${stat.size} bytes`);
-  return data;
+  // IOUtils 返回的数组可能来自其他 realm（pdf-lib instanceof 检查会拒绝），
+  // 复制到当前 realm（与 cropFile 的 ZoteroFileSystem 行为一致）
+  return new Uint8Array(await IOUtils.read(path));
 }
 
 export async function getAttachmentPath(item: Zotero.Item): Promise<string> {

@@ -82,7 +82,9 @@ export class CropService {
   async cropPdf(request: CropRequest): Promise<CropResult> {
     const config: CropConfig = { ...DEFAULT_CROP_CONFIG, ...request.config };
     const dpi = request.dpi ?? ANALYSIS_DPI;
-    const { data, targetPath, fs, pdfOptions } = request;
+    // 统一归一化输入字节：调用方可能传入其他 realm 的 TypedArray
+    const data = new Uint8Array(request.data);
+    const { targetPath, fs, pdfOptions } = request;
     const progress = request.onProgress ?? (() => {});
     const replacer = new SafeReplacer(fs);
 
@@ -197,7 +199,8 @@ export class CropService {
   }
 
   async restorePdf(request: Omit<CropRequest, 'dpi'>): Promise<CropResult> {
-    const { data, targetPath, fs, pdfOptions } = request;
+    const data = new Uint8Array(request.data);
+    const { targetPath, fs, pdfOptions } = request;
     const replacer = new SafeReplacer(fs);
 
     let writer: PdfWriter;
