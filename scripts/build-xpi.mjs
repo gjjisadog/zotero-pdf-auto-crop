@@ -50,6 +50,14 @@ await cp(join(ROOT, 'addon'), BUILD, { recursive: true });
 await mkdir(FONTS, { recursive: true });
 await cp(join(ROOT, 'node_modules/pdfjs-dist/standard_fonts'), FONTS, { recursive: true });
 
+// 3.1 第三方许可证（P1-5：发行包必须包含依赖许可文本）
+const LICENSES = join(BUILD, 'licenses');
+await mkdir(LICENSES, { recursive: true });
+await cp(join(ROOT, 'node_modules/pdf-lib/LICENSE.md'), join(LICENSES, 'pdf-lib-LICENSE'));
+await cp(join(ROOT, 'node_modules/pdfjs-dist/LICENSE'), join(LICENSES, 'pdfjs-LICENSE'));
+await cp(join(FONTS, 'LICENSE_FOXIT'), join(LICENSES, 'standard_fonts-LICENSE_FOXIT'));
+await cp(join(FONTS, 'LICENSE_LIBERATION'), join(LICENSES, 'standard_fonts-LICENSE_LIBERATION'));
+
 // 4. 打包 XPI
 await mkdir(DIST, { recursive: true });
 const files = [];

@@ -125,7 +125,9 @@ MIT License（详见 [LICENSE](LICENSE)）。
 
 算法设计参考了 [abarker/pdfCropMargins](https://github.com/abarker/pdfCropMargins)
 （GPL-3.0-or-later）的思想，但本插件为其**独立实现**，未复制其源码，不受 GPL 传染；
-运行时依赖为 MIT 许可的纯 JavaScript 库（pdf-lib、pdf.js）。
+运行时依赖：**pdf-lib（MIT）**、**PDF.js（Apache-2.0）**、标准字体数据；
+第三方许可证详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，
+XPI 发行包内包含对应许可证文本（`licenses/`）。
 
 ## 实机验证（Zotero 9.0.6，macOS）
 
@@ -150,7 +152,7 @@ MIT License（详见 [LICENSE](LICENSE)）。
 ```bash
 npm install
 npm run gen-fixtures   # 生成合成测试 PDF（无版权）
-npm test               # 单元 + 集成 + 安全测试（73 项）
+npm test               # 单元 + 集成 + 安全测试（85 项）
 npm run build          # 构建 dist/*.xpi
 ```
 
